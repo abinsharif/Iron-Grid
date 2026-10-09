@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a0e15">
+  <title>IRON GRID V3 — Turn-Based Tactics</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="hud">
+    <div class="brand">IRON<span>GRID</span><small>V3</small></div>
+    <div class="stats">
+      <div class="stat"><span class="k">TURN</span><b id="turn">1</b></div>
+      <div class="stat"><span class="k">CREDITS</span><b id="credits">0</b><i id="income"></i></div>
+      <div class="stat"><span class="k">FORCES</span><b><span id="forces">0</span>/<span id="cap">20</span></b></div>
+      <div class="stat"><span class="k">AI</span><b class="lvl" id="lvl-badge">normal</b></div>
+    </div>
+    <nav class="actions" aria-label="Game controls">
+      <button id="end-turn" class="btn-ig primary">End turn <kbd>E</kbd></button>
+      <button id="btn-new" class="btn-ig danger">New operation <kbd>N</kbd></button>
+      <button id="btn-saves" class="btn-ig">Saves <kbd>S</kbd></button>
+      <button id="btn-settings" class="btn-ig">Settings <kbd>O</kbd></button>
+      <button id="btn-help" class="btn-ig">Help <kbd>?</kbd></button>
+      <button id="btn-export" class="btn-ig">Export board <kbd>P</kbd></button>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <section class="board-col" aria-label="Battlefield">
+      <div class="board-wrap">
+        <canvas id="board" width="638" height="462" tabindex="0" aria-label="Tactical battlefield. Use arrow keys to move and Enter to select."></canvas>
+        <div id="end-overlay" class="overlay hidden">
+          <div class="panel center">
+            <h2 id="end-title">VICTORY</h2>
+            <p id="end-reason"></p>
+            <div id="record-row" class="row-gap hidden">
+              <input id="cmdr-name" maxlength="12" placeholder="Commander name" aria-label="Commander name">
+              <button id="save-record" class="btn-ig primary">Save record</button>
+            </div>
+            <button id="rematch" class="btn-ig primary">New operation</button>
+          </div>
+        </div>
+      </div>
+      <div id="statusline" class="statusline" role="status">Connecting to headquarters…</div>
+      <div id="kbd-hint" class="kbd-hint"></div>
+    </section>
+
+    <aside class="side">
+      <div class="tabs" role="tablist" aria-label="Battle information">
+        <button class="tab active" data-tab="intel" role="tab">Intel <kbd>I</kbd></button>
+        <button class="tab" data-tab="log" role="tab">Logbook <kbd>L</kbd></button>
+        <button class="tab" data-tab="manual" role="tab">Manual <kbd>M</kbd></button>
+        <button class="tab" data-tab="records" role="tab">Records <kbd>R</kbd></button>
+      </div>
+
+      <section id="tab-intel" class="tabpane card-ig" role="tabpanel">
+        <h3>INTEL</h3>
+        <div id="info-body" class="info">Select a unit, building or tile.</div>
+        <div id="info-actions" class="info-actions"></div>
+        <div id="ledger" class="ledger"></div>
+      </section>
+
+      <section id="tab-log" class="tabpane card-ig hidden" role="tabpanel">
+        <h3>BATTLE LOG</h3>
+        <div id="log-filters" class="chips"></div>
+        <div id="log" class="log"></div>
+      </section>
+
+      <section id="tab-manual" class="tabpane card-ig hidden" role="tabpanel">
+        <h3>FIELD MANUAL</h3>
+        <div id="manual" class="manual"></div>
+      </section>
+
+      <section id="tab-records" class="tabpane card-ig hidden" role="tabpanel">
+        <h3>HALL OF FAME <small class="muted">verified victories</small></h3>
+        <div class="scroll-x"><table id="hof" class="tbl"></table></div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="modal-new" class="overlay fixed hidden">
+    <section class="panel modal-p">
+      <h2>New operation</h2>
+      <p class="muted">Choose the enemy AI doctrine.</p>
+      <div id="level-list" class="stack"></div>
+      <button id="modal-new-cancel" class="btn-ig">Cancel</button>
+    </section>
+  </div>
+  <div id="modal-confirm" class="overlay fixed hidden">
+    <section class="panel modal-p center">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text" class="muted"></p>
+      <div id="confirm-actions" class="row-gap"></div>
+    </section>
+  </div>
+  <div id="modal-settings" class="overlay fixed hidden">
+    <section class="panel modal-p">
+      <h2>Settings</h2>
+      <div id="settings-body" class="settings"></div>
+      <button id="settings-close" class="btn-ig">Close</button>
+    </section>
+  </div>
+  <div id="modal-saves" class="overlay fixed hidden">
+    <section class="panel modal-p wide">
+      <h2>Saves</h2>
+      <div class="row-gap">
+        <input id="save-name" maxlength="40" placeholder="Save name" aria-label="Save name">
+        <button id="save-btn" class="btn-ig primary">Save game</button>
+      </div>
+      <div id="save-list" class="save-list"></div>
+      <button id="saves-close" class="btn-ig">Close</button>
+    </section>
+  </div>
+  <div id="modal-help" class="overlay fixed hidden">
+    <section class="panel modal-p wide">
+      <h2>Field manual — controls</h2>
+      <div id="help-body" class="help"></div>
+      <button id="help-close" class="btn-ig">Close</button>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/game.js') }}"></script>
+</body>
+</html>
