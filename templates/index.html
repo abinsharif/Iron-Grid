@@ -4,17 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0a0e15">
-  <title>IRON GRID V3 — Turn-Based Tactics</title>
+  <title>IRON GRID V4 — Turn-Based Tactics</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
   <header class="hud">
-    <div class="brand">IRON<span>GRID</span><small>V3</small></div>
+    <div class="brand">IRON<span>GRID</span><small>V4</small></div>
     <div class="stats">
       <div class="stat"><span class="k">TURN</span><b id="turn">1</b></div>
+      <div class="stat"><span class="k">PHASE</span><b id="turn-state">Your move</b></div>
       <div class="stat"><span class="k">CREDITS</span><b id="credits">0</b><i id="income"></i></div>
       <div class="stat"><span class="k">FORCES</span><b><span id="forces">0</span>/<span id="cap">20</span></b></div>
+      <div class="stat" id="ready-wrap"><span class="k">READY</span><b id="ready-stat">–</b></div>
       <div class="stat"><span class="k">AI</span><b class="lvl" id="lvl-badge">normal</b></div>
+      <div class="stat"><span class="k">CMDR</span><b class="lvl" id="cmdr">—</b></div>
     </div>
     <nav class="actions" aria-label="Game controls">
       <button id="end-turn" class="btn-ig primary">End turn <kbd>E</kbd></button>
@@ -28,17 +36,24 @@
 
   <main class="layout">
     <section class="board-col" aria-label="Battlefield">
-      <div class="board-wrap">
+      <div class="zoombar" id="zoombar">
+        <button id="zoom-out" class="btn-ig sm" title="Zoom out"><i class="bi bi-zoom-out"></i></button>
+        <button id="zoom-in" class="btn-ig sm" title="Zoom in"><i class="bi bi-zoom-in"></i></button>
+        <button id="zoom-fit" class="btn-ig sm" title="Fit to screen"><i class="bi bi-aspect-ratio"></i> Fit</button>
+        <button id="zoom-reset" class="btn-ig sm" title="Actual size"><i class="bi bi-fullscreen"></i> 1:1</button>
+        <span class="muted" style="font-size:.78rem">wheel = zoom · drag = pan</span>
+      </div>
+      <div class="board-wrap" id="board-scroll">
         <canvas id="board" width="638" height="462" tabindex="0" aria-label="Tactical battlefield. Use arrow keys to move and Enter to select."></canvas>
         <div id="end-overlay" class="overlay hidden">
           <div class="panel center">
             <h2 id="end-title">VICTORY</h2>
             <p id="end-reason"></p>
-            <div id="record-row" class="row-gap hidden">
-              <input id="cmdr-name" maxlength="12" placeholder="Commander name" aria-label="Commander name">
-              <button id="save-record" class="btn-ig primary">Save record</button>
+            <p id="end-note" class="end-note"></p>
+            <div class="row-gap">
+              <button id="rematch" class="btn-ig primary">Back to lobby</button>
+              <button id="lobby-return" class="btn-ig">Lobby</button>
             </div>
-            <button id="rematch" class="btn-ig primary">New operation</button>
           </div>
         </div>
       </div>
@@ -52,6 +67,7 @@
         <button class="tab" data-tab="log" role="tab">Logbook <kbd>L</kbd></button>
         <button class="tab" data-tab="manual" role="tab">Manual <kbd>M</kbd></button>
         <button class="tab" data-tab="records" role="tab">Records <kbd>R</kbd></button>
+        <button class="tab" data-tab="chat" role="tab">Comms <kbd>C</kbd></button>
       </div>
 
       <section id="tab-intel" class="tabpane card-ig" role="tabpanel">
@@ -73,8 +89,17 @@
       </section>
 
       <section id="tab-records" class="tabpane card-ig hidden" role="tabpanel">
-        <h3>HALL OF FAME <small class="muted">verified victories</small></h3>
+        <h3>HALL OF FAME <small class="muted">top 3 wins per AI · all commanders</small></h3>
         <div class="scroll-x"><table id="hof" class="tbl"></table></div>
+      </section>
+
+      <section id="tab-chat" class="tabpane card-ig hidden" role="tabpanel">
+        <h3>BATTLE COMMS <small class="muted">multiplayer only</small></h3>
+        <div id="chat-log" class="log" style="min-height:180px;max-height:300px"></div>
+        <div class="row-gap" style="justify-content:flex-start;margin-top:8px">
+          <input id="chat-in" class="chat-in" maxlength="200" placeholder="Message your opponent…" aria-label="Chat message">
+          <button id="chat-send" class="btn-ig primary">Send</button>
+        </div>
       </section>
     </aside>
   </main>
@@ -82,7 +107,7 @@
   <div id="modal-new" class="overlay fixed hidden">
     <section class="panel modal-p">
       <h2>New operation</h2>
-      <p class="muted">Choose the enemy AI doctrine.</p>
+      <p class="muted">Choose the enemy AI doctrine — ordered from weakest to strongest.</p>
       <div id="level-list" class="stack"></div>
       <button id="modal-new-cancel" class="btn-ig">Cancel</button>
     </section>

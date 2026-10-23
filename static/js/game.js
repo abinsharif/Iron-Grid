@@ -1,4 +1,4 @@
-/* IRON GRID V3 client. All rules live on the server; this file renders and sends intents. */
+/* IRON GRID V4 client. All rules live on the server; this file renders and sends intents. */
 (() => {
   "use strict";
   const TILE = 44, LAB = 22;
@@ -10,10 +10,23 @@
 
   // ---------------------------------------------------------------- settings
   const SKEY = "irongrid.settings";
-  const DEFAULTS = { theme: "dark", keyboard: true, cvd: false, bigtext: false, anim: "normal",
-                     sound: false, autosave: true, confirmEnd: true, level: "normal" };
+  const SND_CHANNELS = { select: "Cursor & select", move: "Unit movement", hit: "Attacks & damage",
+                         kill: "Kills & losses", capture: "Captures", turn: "Turn notification",
+                         msg: "New chat message", contact: "Contacts & ambushes",
+                         heal: "Repairs", err: "Errors", build: "Production & construction" };
+  const DEFAULTS = { theme: "dark", keyboard: true, cvd: false, bigtext: false, animspeed: 57,
+                     sound: false, volume: 0.8,
+                     snd: Object.fromEntries(Object.keys(SND_CHANNELS).map(k => [k, true])),
+                     sndvol: Object.fromEntries(Object.keys(SND_CHANNELS).map(k => [k, 1])),
+                     zoombar: true, readycounter: true, hoverfx: true,
+                     autosave: true, confirmEnd: true, level: "normal" };
   let settings = Object.assign({}, DEFAULTS);
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SKEY) || "{}")); } catch (e) {}
+  settings.snd = Object.assign({}, DEFAULTS.snd, settings.snd || {});
+  settings.sndvol = Object.assign({}, DEFAULTS.sndvol, settings.sndvol || {});
+  if (settings.anim !== undefined && settings.animspeed === undefined)
+    settings.animspeed = settings.anim === "off" ? 0 : settings.anim === "fast" ? 85 : 57;
+  delete settings.anim;
   function saveSettings() { try { localStorage.setItem(SKEY, JSON.stringify(settings)); } catch (e) {} }
   function applySettings() {
     let t = settings.theme;
@@ -26,23 +39,38 @@
       ? "Keyboard on — arrows move the cursor · Enter select/confirm · Tab next unit · T next target · E end turn · ? help"
       : "Keyboard control is off (Settings → Keyboard control).";
   }
-  const speed = ms => settings.anim === "off" ? 0 : settings.anim === "fast" ? ms * 0.45 : ms;
+  const speed = ms => settings.animspeed <= 0 ? 0
+    : ms * (1.8 - (settings.animspeed / 100) * 1.6);   // animation-speed slider
   const sleep = ms => (speed(ms) ? sleepRaw(speed(ms)) : Promise.resolve());
 
   // ---------------------------------------------------------------- audio (optional)
   let actx = null;
   const BEEP_VOLUME = 0.012;
+  // [freq, duration, waveform, second-freq] — second-freq plays a beat later (two-tone sounds)
+  const SND_MAP = {
+    select: [520, .05, "square"], move: [294, .07, "triangle"],
+    hit: [147, .12, "sawtooth"], kill: [98, .22, "sawtooth", 62],
+    capture: [523, .12, "triangle", 784], turn: [440, .1, "sine", 587],
+    heal: [740, .1, "sine"], err: [110, .14, "square"],
+    msg: [880, .12, "sine", 1175], contact: [220, .16, "square", 175],
+    build: [196, .09, "square", 262],
+  };
+  function tone(f, d, type, vol, when) {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = f; g.gain.value = vol;
+    o.connect(g); g.connect(actx.destination);
+    o.start(actx.currentTime + when); o.stop(actx.currentTime + when + d);
+  }
   function beep(kind) {
     if (!settings.sound) return;
+    if (settings.snd && settings.snd[kind] === false) return;
     try {
       actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-      const map = { select: [520, .05, "square"], move: [330, .07, "triangle"], hit: [160, .12, "sawtooth"],
-                    kill: [90, .25, "sawtooth"], capture: [660, .18, "triangle"], turn: [440, .12, "sine"],
-                    heal: [740, .1, "sine"], err: [120, .12, "square"] };
-      const [f, d, type] = map[kind] || map.select;
-      const o = actx.createOscillator(), g = actx.createGain();
-      o.type = type; o.frequency.value = f; g.gain.value = BEEP_VOLUME;
-      o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime + d);
+      const [f, d, type, f2] = SND_MAP[kind] || SND_MAP.select;
+      const vol = BEEP_VOLUME * (settings.volume !== undefined ? settings.volume : 0.8)
+                  * (settings.sndvol[kind] !== undefined ? settings.sndvol[kind] : 1);
+      tone(f, d, type, vol, 0);
+      if (f2) tone(f2, d, type, vol, d * 0.85);
     } catch (e) {}
   }
 
@@ -56,22 +84,60 @@
   const canvas = $("board"), screenCtx = canvas.getContext("2d");
   g = screenCtx;
 
+  // ---------------------------------------------------------------- zoom & pan (bitmap scaling + scroll pan)
+  const view = { s: 1 };
+  function applyZoom() {
+    const bw = LAB + W * TILE, bh = LAB + H * TILE;
+    canvas.style.width = Math.round(bw * view.s) + "px";
+    canvas.style.height = Math.round(bh * view.s) + "px";
+  }
+  function zoomBy(f) { view.s = Math.min(2.5, Math.max(0.5, view.s * f)); applyZoom(); }
+  function zoomFit() {
+    const box = $("board-scroll");
+    const bw = LAB + W * TILE, bh = LAB + H * TILE;
+    view.s = Math.min(1.2, Math.max(0.4, Math.min((box.clientWidth - 8) / bw, (box.clientHeight - 8) / bh)));
+    applyZoom();
+  }
+  function zoomReset() { view.s = 1; applyZoom(); }
+  let panning = null, panned = false;
+  canvas.addEventListener("mousedown", e => { panning = { x: e.clientX, y: e.clientY, l: $("board-scroll").scrollLeft, t: $("board-scroll").scrollTop }; panned = false; });
+  window.addEventListener("mousemove", e => {
+    if (!panning) return;
+    const dx = e.clientX - panning.x, dy = e.clientY - panning.y;
+    if (Math.abs(dx) + Math.abs(dy) > 6) panned = true;
+    $("board-scroll").scrollLeft = panning.l - dx;
+    $("board-scroll").scrollTop = panning.t - dy;
+  });
+  window.addEventListener("mouseup", () => { panning = null; });
+  canvas.addEventListener("wheel", e => { e.preventDefault(); zoomBy(e.deltaY < 0 ? 1.12 : 0.9); }, { passive: false });
+
   async function api(path, body, method) {
     const opt = body !== undefined
       ? { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
       : (method ? { method } : {});
     const r = await fetch(path, opt);
+    if (r.status === 401) { location.href = "/lobby"; throw new Error("login required"); }
     const j = await r.json().catch(() => ({ ok: false, error: "bad response" }));
     if (!r.ok || j.ok === false) throw new Error(j.error || ("HTTP " + r.status));
     return j;
   }
   const U = t => META.units[t];
+  const UDEF = {name: "Unknown", code: "???", cat: "-", cls: "foot", hp: 1, move: 0, cost: 0,
+                rng: [1, 1], vis: 1, capture: false, indirect: false, move_fire: false,
+                atk: {soft: 0, armor: 0, hard: 0, air: 0, sea: 0}, desc: ""};
   const findUnit = id => state.units.find(u => u.id === id);
   const unitAt = (x, y) => state.units.find(u => u.x === x && u.y === y);
   const buildingAt = (x, y) => state.buildings.find(b => b.x === x && b.y === y);
   const myUnits = () => state.units.filter(u => u.side === "P");
   const uname = u => `${u.side === "P" ? "Our" : "Enemy"} ${U(u.type).code}-${u.id}`;
   const err = e => { toast(e.message, "bad"); beep("err"); };
+
+  async function refreshCmdr() {
+    try {
+      const j = await api("/api/me");
+      if (j.user) $("cmdr").textContent = `${j.user.name} · ${j.user.rank} ${j.user.title}`;
+    } catch (e) {}
+  }
 
   // ---------------------------------------------------------------- palette
   function pal() {
@@ -83,11 +149,17 @@
       uP: light ? "#d4e6fa" : "#123349", uA: light ? "#fadcdc" : "#3d1618",
       text: light ? "#0e1a2c" : "#eef3ff", grid: light ? "rgba(0,0,0,.07)" : "rgba(255,255,255,.045)",
       tiles: light ? { ".": ["#cfe3b8", "#c6dbae"], "=": ["#c3bcae", "#bcb5a6"], "F": ["#8fbf8a", "#86b681"],
-                       "M": ["#aaa49b", "#b3ada4"], "W": ["#8ec3e6", "#86bce0"], "S": ["#a9b27f", "#a1aa77"] }
+                       "M": ["#aaa49b", "#b3ada4"], "W": ["#8ec3e6", "#86bce0"], "S": ["#a9b27f", "#a1aa77"],
+                       "B": ["#b9a98e", "#b2a287"], "U": ["#c9b7a0", "#c2b099"], "R": ["#9aa3ad", "#939ca7"],
+                       "~": ["#e0d3a8", "#d8cba0"], "O": ["#7fb2d9", "#77abd4"] }
                    : { ".": ["#1b2331", "#1e2837"], "=": ["#2b2f3a", "#303542"], "F": ["#17301f", "#1a3a24"],
-                       "M": ["#333a45", "#3a4250"], "W": ["#0f2f4a", "#123a5c"], "S": ["#262c17", "#2b321b"] },
-      glyph: light ? { "=": "#6f685b", "M": "#6c675f", "W": "#2f6a99", "S": "#6a7340", "F": "#2f6a3a" }
-                   : { "=": "#8892a8", "M": "#8f9bb5", "W": "#3f7ab5", "S": "#7d8a4a", "F": "#2c6b3c" },
+                       "M": ["#333a45", "#3a4250"], "W": ["#0f2f4a", "#123a5c"], "S": ["#262c17", "#2b321b"],
+                       "B": ["#4a3b28", "#51422d"], "U": ["#3d3630", "#453d36"], "R": ["#27313d", "#2c3844"],
+                       "~": ["#6b5d3a", "#74653f"], "O": ["#0d2337", "#10293f"] },
+      glyph: light ? { "=": "#6f685b", "M": "#6c675f", "W": "#2f6a99", "S": "#6a7340", "F": "#2f6a3a",
+                       "B": "#7a5c2e", "U": "#7d5a44", "R": "#4a545f", "~": "#8a7a4a", "O": "#1e5a86" }
+                   : { "=": "#8892a8", "M": "#8f9bb5", "W": "#3f7ab5", "S": "#7d8a4a", "F": "#2c6b3c",
+                       "B": "#c9a86a", "U": "#c79b7a", "R": "#7f95ad", "~": "#d9c98a", "O": "#3f8ac0" },
     };
   }
   const CLSCOL = { foot: "#2b8a4a", tread: "#b8761a", air: "#2b82b8" };
@@ -102,7 +174,8 @@
       g.font = "bold 11px system-ui"; g.fillStyle = P.lab; g.textAlign = "center"; g.textBaseline = "middle";
       for (let x = 0; x < W; x++) g.fillText(String.fromCharCode(65 + x), px(x) + TILE / 2, LAB / 2);
       for (let y = 0; y < H; y++) g.fillText(String(y + 1), LAB / 2, py(y) + TILE / 2);
-      const GL = { "=": "═", "M": "▲", "W": "≋", "S": "⁞", "F": "♣" };
+      const GL = { "=": "═", "M": "▲", "W": "≋", "S": "⁞", "F": "♣", "B": "≡", "U": "▦", "R": "╬",
+                   "~": "∴", "O": "≈" };
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
         const c = TERRAIN[y][x], [c1, c2] = P.tiles[c];
         g.fillStyle = (x + y) % 2 ? c1 : c2; g.fillRect(px(x), py(y), TILE, TILE);
@@ -121,7 +194,9 @@
     } finally { g = prev; }
   }
   function drawBuildings(P) {
-    const GL = { HQ: "★", factory: "⚙", city: "⌂" };
+    const GL = { HQ: "★", factory: "⚙", city: "⌂", barracks: "⛺", fort: "✚",
+                 radar: "◉", training: "▲", airbase: "✈", harbor: "⚓",
+                 shipyard: "⚒", battery: "☗" };
     for (const b of state.buildings) {
       const x = px(b.x), y = py(b.y);
       const col = b.side ? P[b.side] : (P.light ? "#59657b" : "#9aa7bb");
@@ -132,6 +207,13 @@
       g.fillStyle = col; g.font = `${b.type === "HQ" ? 22 : 17}px system-ui`;
       g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(GL[b.type], x + TILE / 2, y + TILE / 2 - 2);
       if (b.level > 1) { g.font = "bold 9px system-ui"; g.fillText("L" + b.level, x + TILE - 9, y + 8); }
+      if (b.cap) { g.font = "bold 9px system-ui"; g.fillStyle = "#ffb454";
+        g.fillText(`${b.cap.pts}/${b.cap.side === "P" ? (b.type === "HQ" ? 3 : 2) : "?"}`, x + 6, y + TILE - 7); }
+      if (b.hp !== undefined) {
+        g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(x + 6, y + TILE - 8, TILE - 12, 4);
+        g.fillStyle = b.hp / b.max_hp > 0.4 ? "#ffb454" : "#ff5d5d";
+        g.fillRect(x + 6, y + TILE - 8, (TILE - 12) * b.hp / b.max_hp, 4);
+      }
       g.globalAlpha = 1;
     }
   }
@@ -153,8 +235,12 @@
     return [u.x, u.y];
   }
   function drawUnits(P) {
+    const stacks = {};
     for (const u of state.units) {
-      const [gx, gy] = unitPos(u), x = LAB + gx * TILE, y = LAB + gy * TILE, t = U(u.type);
+      const k = u.x + "," + u.y;
+      const n = stacks[k] = (stacks[k] || 0) + 1;
+      const off = n > 1 ? 7 : 0;
+      const [gx, gy] = unitPos(u), x = LAB + gx * TILE + off, y = LAB + gy * TILE - off, t = U(u.type);
       const col = P[u.side];
       const spent = u.side === "P" && (u.acted || (u.moved && !t.move_fire));
       g.globalAlpha = spent ? 0.5 : 1;
@@ -179,11 +265,12 @@
     g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
   }
   function drawForecast(P) {
-    if (!sel) return;
+    if (!sel || settings.hoverfx === false) return;
     for (const tile of [hover, settings.keyboard ? cursor : null]) {
       if (!tile) continue;
       const u = unitAt(tile.x, tile.y);
-      const a = u && sel.attacks.get(u.id);
+      const bb = u ? null : buildingAt(tile.x, tile.y);
+      const a = sel.attacks.get((u || bb).id);
       if (!a) continue;
       const txt = `-${a.dmg}${a.counter ? "  ↩" + a.counter : ""}${a.kill ? "  KILL" : ""}`;
       g.font = "bold 12px system-ui"; const w = g.measureText(txt).width + 12;
@@ -223,12 +310,21 @@
   // ---------------------------------------------------------------- HUD / top bar
   function updateTop() {
     $("turn").textContent = state.turn;
+    const turnState = $("turn-state");
+    if (turnState) {
+      turnState.textContent = state.turn_label || (state.your_turn ? "Your move" : "Opponent's move");
+      turnState.title = state.your_turn ? "It is your turn." : "It is the opponent's turn.";
+    }
     $("credits").textContent = state.credits;
     $("income").textContent = "+" + state.income + "/turn";
     $("forces").textContent = myUnits().length;
     $("cap").textContent = state.unit_cap;
-    $("lvl-badge").textContent = state.level;
-    $("end-turn").disabled = busy || state.over;
+    $("lvl-badge").textContent = (state.level === "pvp" ? "PvP" : state.level) + " · T" + (state.tier || 2);
+    const ready = myUnits().filter(u => !u.acted && !(u.moved && !U(u.type).move_fire)).length;
+    $("ready-stat").textContent = `${ready} / ${myUnits().length - ready}`;
+    $("ready-wrap").style.display = settings.readycounter ? "" : "none";
+    $("zoombar").classList.toggle("hidden", !settings.zoombar);
+    $("end-turn").disabled = busy || state.over || state.your_turn === false;
   }
   function toast(text, tone) {
     const el = $("statusline"); el.textContent = text;
@@ -250,18 +346,50 @@
 
   // ---------------------------------------------------------------- state loading
   function loadState(s) {
+    if (s.ter && s.ter.length) {                      // live terrain (rails, bridges, roads)
+      let diff = TERRAIN.length !== s.ter.length;
+      if (!diff) for (let i = 0; i < s.ter.length; i++) if (TERRAIN[i] !== s.ter[i]) { diff = true; break; }
+      if (diff) TERRAIN = s.ter;
+    } else if (s.map !== undefined && META.maps && META.maps[s.map]) {
+      const t = META.maps[s.map].terrain;
+      if (TERRAIN !== t) TERRAIN = t;
+    }
+    if (s.tier && s.tier !== manualTier) buildManual();
+    if (s.w && s.h && (s.w !== W || s.h !== H)) {       // board size is per-game (tier 4+)
+      W = s.w; H = s.h;
+      canvas.width = LAB + W * TILE; canvas.height = LAB + H * TILE;
+      view.s = 1;
+    }
+    applyZoom();
     state = s; visible = new Set(s.visible); seen = new Set(s.seen);
     if (sel) { const u = findUnit(sel.unit.id); if (u) sel.unit = u; else sel = null; }
-    updateTop(); updateInfo(); renderLog(); renderLedger();
-    if (s.over) showEnd(s); else $("end-overlay").classList.add("hidden");
+    const prevCredits = state ? state.credits : 0;
+    const wasMyTurn = state ? state.your_turn !== false : false;
+    updateTop(); updateInfo(); renderLog(); renderLedger(); watchOpponent();
+    if (!s.over) {
+      let phase = s.turn_label || (s.your_turn ? "Your move" : "Opponent's move");
+      if (s.level === "pvp" && s.your_turn === false && s.opp_online === false)
+        phase += " — opponent is away; the battle is kept open (rejoin from the lobby anytime)";
+      $("statusline").textContent = `Turn ${s.turn} — ${phase}.`;
+      if (!wasMyTurn && s.your_turn && s.credits > prevCredits)
+        toast(`Turn ${s.turn} — income collected: ${s.credits} cr.`, "good");
+    }
+    if (s.over) { showEnd(s); refreshCmdr(); } else $("end-overlay").classList.add("hidden");
   }
 
   // ---------------------------------------------------------------- info panel
   function setInfo(html) { $("info-body").innerHTML = html; $("info-actions").innerHTML = ""; }
-  function addBtn(html, fn, cls, disabled) {
+  function addBtn(html, fn, cls, disabled, reason) {
     const b = document.createElement("button");
-    b.className = "btn-ig sm " + (cls || ""); b.innerHTML = html; b.disabled = !!disabled;
-    b.addEventListener("click", fn); $("info-actions").appendChild(b); return b;
+    b.className = "btn-ig sm " + (cls || "") + (disabled ? " off" : "");
+    b.innerHTML = disabled ? "⛔ " + html : html;
+    if (disabled) {
+      b.title = reason || "Not available";
+      b.addEventListener("click", () => { toast("⛔ " + (reason || "Not available"), "bad"); beep("err"); });
+    } else {
+      b.addEventListener("click", fn);
+    }
+    $("info-actions").appendChild(b); return b;
   }
   const clsPill = c => `<span class="pill ${c}">${c.toUpperCase()}</span>`;
   function updateInfo() {
@@ -271,8 +399,9 @@
     else setInfo(`<span class="muted">Select a unit, building or tile. Click, or use the cursor and <kbd>Enter</kbd>.</span>`);
   }
   function showUnitInfo(u, selectable) {
-    const t = U(u.type), mine = u.side === "P";
+    const t = U(u.type) || UDEF, mine = u.side === "P";
     const st = mine ? (u.acted ? "spent" : u.moved ? "moved — can still attack" : "ready") : "hostile";
+    const satk = v => v > 0 ? Math.max(1, Math.round(v * u.hp / u.mhp)) : 0;   // real, HP-scaled ATK
     const road = (t.move / META.terrain["="][t.cls]).toFixed(t.cls === "air" ? 0 : 0);
     let html = `<div><span class="title">${t.full}</span> <span class="${mine ? "tag-p" : "tag-a"}">${uname(u)}</span> ${clsPill(t.cls)}</div>
       <div class="sub">${t.cat} · ${mine ? "status: " + st : "hostile contact"} · ${t.capture ? "can capture" : "cannot capture"}</div>
@@ -281,53 +410,131 @@
         <div><span>MOVE</span><b>${t.move}</b></div>
         <div><span>RANGE</span><b>${t.rng[0] === t.rng[1] ? t.rng[0] : t.rng.join("–")}</b></div>
         <div><span>VISION</span><b>${t.vis}</b></div>
-        <div><span>ATK soft</span><b>${t.atk.soft}</b></div>
-        <div><span>ATK armor</span><b>${t.atk.armor}</b></div>
-        <div><span>ATK hard</span><b>${t.atk.hard}</b></div>
-        <div><span>ATK air</span><b>${t.atk.air}</b></div>
+        ${u.fuel !== undefined ? `<div><span>FUEL</span><b>${u.fuel}/${u.fuel_max || 32}</b></div>` : ""}
+        <div><span>ATK soft</span><b>${satk(t.atk.soft)}</b></div>
+        <div><span>ATK armor</span><b>${satk(t.atk.armor)}</b></div>
+        <div><span>ATK hard</span><b>${satk(t.atk.hard)}</b></div>
+        <div><span>ATK air</span><b>${satk(t.atk.air)}</b></div>
+        <div><span>ATK sea</span><b>${satk(t.atk.sea || 0)}</b></div>
         <div><span>COST</span><b>${t.cost}</b></div>
       </div>
       <div class="sub">${t.cls === "air" ? "Flies over all terrain." : `Move ${t.move} on plains · ${road} tiles along roads · ${t.cls === "foot" ? "can cross mountains" : "cannot cross mountains"}.`}
-      ${t.indirect ? ` Indirect fire: ${t.move_fire ? "can move and fire; " : "cannot move and fire; "}never counters.` : ""}</div>
+      ${t.indirect ? ` Indirect fire: ${t.move_fire ? "can move and fire; " : "cannot move and fire; "}never counters.` : ""}
+      ATK values shown are scaled by current HP (full values in the Manual).</div>
       <div class="sub" style="margin-top:6px">${t.desc}</div>`;
     if (!mine && sel) {
       const a = sel.attacks.get(u.id);
       if (a) html += `<div class="forecast">Your ${U(sel.unit.type).code} would deal <b>${a.dmg}</b> damage${a.kill ? " — <b>destroys it</b>" : ""}${a.counter ? `, taking <b>${a.counter}</b> back` : ", no counter"}.</div>`;
     }
     setInfo(html);
-    if (mine && !busy && !state.over) {
+    if (mine && !busy && !state.over && state.your_turn !== false) {
       if (!u.acted) addBtn("Wait <kbd>W</kbd>", () => doWait(u.id), "");
       if (t.capture && !u.acted && !buildingAt(u.x, u.y) && [".", "="].includes(TERRAIN[u.y][u.x])) {
         addBtn(`Found factory ${META.found_cost} <kbd>F</kbd>`, () => doFound(u.id), "good", state.credits < META.found_cost);
+      }
+      if ((state.tier || 2) >= 3 && !u.acted) {
+        const terr = TERRAIN[u.y][u.x];
+        if (u.type === "eng") {
+          if ([".", "F", "S"].includes(terr) && !buildingAt(u.x, u.y))
+            addBtn("⚒ Road 100", () => doConstruct(u.id, "road"), "", state.credits < 100,
+              state.credits < 100 ? "Insufficient funds" : "");
+          if ([".", "="].includes(terr) && !buildingAt(u.x, u.y))
+            addBtn("⚒ Rail 200", () => doConstruct(u.id, "rail"), "", state.credits < 200,
+              state.credits < 200 ? "Insufficient funds" : "");
+          if (!buildingAt(u.x, u.y))
+            addBtn("⚒ Fort 300", () => doConstruct(u.id, "fort"), "good", state.credits < 300,
+              state.credits < 300 ? "Insufficient funds" : "");
+        }
+        if (u.type === "ls") {
+          const cap = 2, have = u.cargo || 0;
+          const pax = unitAt(u.x, u.y);
+          if (have < cap && pax && pax.side === "P" && ["foot", "tread"].includes(U(pax.type).cls))
+            addBtn(`⚓ Load ${U(pax.type).code} (${have}/${cap})`, () => doLoad(u.id), "primary");
+          if (have > 0) {
+            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+              const bx = u.x + dx, by = u.y + dy;
+              if (bx >= 0 && by >= 0 && bx < W && by < H && TERRAIN[by][bx] === "~" && !unitAt(bx, by))
+                addBtn(`⚓ Unload → ${label(bx, by)}`, () => doUnload(u.id, bx, by), "primary");
+            }
+          }
+        }
+        if (u.type === "th" && !u.cargo) {
+          const pax = unitAt(u.x, u.y);
+          if (pax && pax.side === "P" && ["inf", "eng", "at", "mortar", "sf"].includes(pax.type))
+            addBtn(`✈ Load ${U(pax.type).code}`, () => doLoad(u.id), "primary");
+        }
+        if (u.type === "th" && u.cargo) {
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const bx = u.x + dx, by = u.y + dy;
+            if (bx >= 0 && by >= 0 && bx < W && by < H && TERRAIN[by][bx] !== "W" && !unitAt(bx, by))
+              addBtn(`✈ Unload → ${label(bx, by)}`, () => doUnload(u.id, bx, by), "primary");
+          }
+        }
+        if (u.type === "bl") {
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const bx = u.x + dx, by = u.y + dy;
+            if (bx >= 0 && by >= 0 && bx < W && by < H && TERRAIN[by][bx] === "W") {
+              addBtn(`⚒ Bridge 250 → ${label(bx, by)}`, () => doConstruct(u.id, "bridge", bx, by), "good", state.credits < 250,
+                state.credits < 250 ? "Insufficient funds" : "");
+              break;
+            }
+          }
+        }
       }
       if (selectable) addBtn("Cancel <kbd>Esc</kbd>", cancelSel, "");
     }
   }
   function showBuildingInfo(b) {
-    const names = { HQ: "Headquarters", factory: "Factory", city: "City" };
+    const names = { HQ: "Headquarters", factory: "Factory", city: "City", barracks: "Barracks",
+                    fort: "Fortification", radar: "Radar Station", training: "Training Camp",
+                    airbase: "Airbase", harbor: "Harbor", shipyard: "Shipyard",
+                    battery: "Coastal Battery" };
     const lvl = b.level || 1, inc = Math.floor(META.income[b.type] * (1 + 0.5 * (lvl - 1)));
     const heal = META.heal[b.type] + (lvl - 1), mine = b.side === "P";
     const owner = b.side === "P" ? `<span class="tag-p">ours</span>` : b.side === "A" ? `<span class="tag-a">enemy</span>` : "neutral";
-    setInfo(`<div><span class="title">${names[b.type]}</span> ${owner} · ${label(b.x, b.y)}${b.visible ? "" : " <span class='muted'>(last seen)</span>"}</div>
-      <div class="statgrid">
+    const needT = b.type === "HQ" ? 3 : 2;
+    const capTxt = b.cap ? `<div class="forecast">${b.cap.side === "P" ? "Our unit" : "Enemy unit"} is capturing this (${b.cap.pts}/${needT}).</div>` : "";
+    const q = state.queue ? state.queue.filter(o => o.x === b.x && o.y === b.y) : [];
+    const qTxt = q.length ? `<div class="sub">⚙ Producing ${U(q[0].utype).code} — ${q[0].left} turn(s) left.</div>` : "";
+    const upTxt = b.upgrading ? `<div class="sub">⚙ Upgrading — ${b.upgrading} turn(s) left.</div>` : "";
+    const moneyOnly = ["HQ", "city"].includes(b.type)
+      ? `<div class="sub">Income building — it produces credits only and builds nothing.</div>` : "";
+    setInfo(`<div><span class="title">${names[b.type]}</span> ${owner} · ${label(b.x, b.y)}${b.visible ? "" : " <span class='muted'>(last seen)</span>"}${capTxt}</div>${upTxt}${qTxt}${moneyOnly}
+      ${["battery", "radar"].includes(b.type) && META.defenses ? (() => {
+        const D = META.defenses[b.type];
+        return `<div class="statgrid">
+          <div><span>POWER</span><b>${D.power}${b.type === "battery" ? "+" + 2 * (lvl - 1) : ""}</b></div>
+          <div><span>RANGE</span><b>${D.range[0] === D.range[1] ? D.range[0] || "—" : D.range.join("–")}</b></div>
+          <div><span>DETECTION</span><b>${D.detection}${b.type === "radar" ? " (sweep)" : ""}</b></div>
+          <div><span>DEFENSE</span><b>${Math.round((1 - META.b_def[b.type]) * 100)}%</b></div>
+        </div>
+        <div class="sub">${b.type === "battery"
+          ? "Automatically fires at the strongest visible enemy ship within range 2-4 at the start of your turn."
+          : "Sweeps a wide detection circle (6) around itself, revealing aircraft, ships and ground forces in the fog."}</div>`;
+      })() : `<div class="statgrid">
         <div><span>INCOME</span><b>+${inc}</b></div><div><span>LEVEL</span><b>${lvl}/${META.max_level}</b></div>
         <div><span>REPAIR</span><b>+${heal}</b></div>
         <div><span>DEFENSE</span><b>${Math.round((1 - META.b_def[b.type]) * 100)}%</b></div>
-      </div>
-      <div class="sub">Units standing here at the start of their turn repair <b>${heal} HP</b> (costs ${Math.round(META.repair_rate * 100)}% of the HP's value in credits).
+      </div>`}
+      <div class="sub">${b.type === "factory" ? "Upkeep −40 cr/turn. " : ""}Units standing here at the start of their turn repair <b>${heal} HP</b> (costs ${Math.round(META.repair_rate * 100)}% of the HP's value in credits).
       ${b.type === "city" ? "Aircraft cannot repair in cities — use an HQ or factory." : ""}
       Infantry and IFVs capture it by ending a move on it.</div>`);
-    if (mine && !busy && !state.over) {
-      if (["HQ", "factory"].includes(b.type)) {
+    if (mine && !busy && !state.over && state.your_turn !== false) {
+      if (["factory", "barracks", "airbase", "shipyard", "harbor"].includes(b.type)) {
         const occupied = unitAt(b.x, b.y);
         const full = myUnits().length >= state.unit_cap;
         if (occupied) $("info-actions").innerHTML += `<span class="muted">Tile occupied — move the unit out to build.</span>`;
-        else META.order.forEach((k, i) => addBtn(`<b>${i + 1}</b> ${U(k).code} · ${U(k).cost}`,
-          () => doBuild(b.x, b.y, k), "", state.credits < U(k).cost || full));
+        else tierUnits().filter(k => (U(k).sites || []).includes(b.type)
+            && (U(k).tech || 1) <= (b.level || 1))
+          .forEach((k, i) => addBtn(`<b>${i + 1}</b> ${U(k).code} · ${U(k).cost}`,
+            () => doBuild(b.x, b.y, k), "", state.credits < U(k).cost || full,
+            full ? "Unit cap reached" : state.credits < U(k).cost ? "Insufficient funds" : ""));
       }
       if (lvl < META.max_level) {
         const c = META.upgrade_base * lvl;
-        addBtn(`Upgrade ${c} <kbd>U</kbd>`, () => doUpgrade(b.x, b.y), "good", state.credits < c);
+        addBtn(`Upgrade ${c} <kbd>U</kbd>`, () => doUpgrade(b.x, b.y), "good",
+          state.credits < c || !!b.upgrading,
+          b.upgrading ? "Already upgrading" : state.credits < c ? "Insufficient funds" : "");
       }
     }
   }
@@ -378,37 +585,75 @@
   }
 
   // ---------------------------------------------------------------- manual
+  let manualTier = 0;
   function buildManual() {
-    const rows = META.cats.map(cat => META.order.filter(k => U(k).cat === cat).map(k => {
+    const tier = (state && state.tier) || 2;
+    manualTier = tier;
+    const tu = tierUnits();
+    const udbRows = tu.map(k => {
       const t = U(k);
-      return `<tr><td><b>${t.code}</b> ${t.full}</td><td>${clsPill(t.cls)}</td><td class="n">${t.hp}</td><td class="n">${t.cost}</td>
-        <td class="n">${t.move}</td><td class="n">${t.rng[0] === t.rng[1] ? t.rng[0] : t.rng.join("–")}</td><td class="n">${t.vis}</td></tr>`;
-    }).join("")).join("");
-    const attackRows = META.order.map(k => {
-      const t = U(k);
-      return `<tr><td><b>${t.code}</b></td><td class="n">${t.atk.soft || "—"}</td><td class="n">${t.atk.armor || "—"}</td>
-        <td class="n">${t.atk.hard || "—"}</td><td class="n">${t.atk.air || "—"}</td></tr>`;
+      const built = `${(t.sites || []).join("/")}${(t.tech || 1) > 1 ? " L" + t.tech : ""}`;
+      const turns = (META.build_times && META.build_times[k]) || 1;
+      return `<tr data-k="${t.code} ${t.full} ${t.cat} ${t.cls} ${t.name}"><td><b>${t.code}</b> ${t.full}</td>` +
+        `<td>${clsPill(t.cls)}</td><td class="n">${t.hp}</td><td class="n">${t.move}</td><td class="n">${t.cost}</td>` +
+        `<td class="n">${t.rng[0] === t.rng[1] ? t.rng[0] : t.rng.join("–")}</td><td class="n">${t.vis}</td>` +
+        `<td class="n">${t.atk.soft || "—"}</td><td class="n">${t.atk.armor || "—"}</td><td class="n">${t.atk.hard || "—"}</td>` +
+        `<td class="n">${t.atk.air || "—"}</td><td class="n">${t.atk.sea || "—"}</td>` +
+        `<td><small>${built}</small></td><td class="n">${turns}</td></tr>`;
     }).join("");
-    const terr = Object.entries(META.terrain).map(([c, T]) =>
+    const attackRows = tierUnits().map(k => {
+      const t = U(k);
+      const built = `${(t.sites || []).join("/")}${(t.tech || 1) > 1 ? " L" + t.tech : ""}`;
+      const turns = (META.build_times && META.build_times[k]) || 1;
+      return `<tr><td><b>${t.code}</b><br><small class="muted">${built} · ${turns}t</small></td>
+        <td class="n">${t.atk.soft || "—"}</td><td class="n">${t.atk.armor || "—"}</td>
+        <td class="n">${t.atk.hard || "—"}</td><td class="n">${t.atk.air || "—"}</td><td class="n">${t.atk.sea || "—"}</td></tr>`;
+    }).join("");
+    const tierInfo = { 1: "Skirmish", 2: "Combined Arms", 3: "Engineers",
+                       4: "Doctrine", 5: "Sky", 6: "Sea" };
+    const sysNotes = [
+      "Captures are instant.",
+      "Captures are instant.",
+      "Captures take 2 consecutive actions (HQ 3). Engineers build roads, railways, fortifications; bridgelayers build bridges. Barracks produce infantry/support; fortifications defend.",
+      "Two-step captures. Radar stations sweep radius 6. Training camps start recruits strong. Pick a doctrine before battle.",
+      "Aircraft carry fuel and refuel at airfields/HQs; aircraft are built only at airfields. Transport helis carry one infantry squad.",
+      "Ships keep to water; submarines hide until sonar (destroyer, 4) or close spotting (2). Warships bombard the shore; landing ships assault beaches with two ground units.",
+    ][tier - 1];
+    const hiddenTerr = tier === 1 ? new Set(["=", "S"]) : new Set();
+    const terr = Object.entries(META.terrain).filter(([c]) => !hiddenTerr.has(c)).map(([c, T]) =>
       `<tr><td><b>${T.name}</b></td><td class="n">${Math.round((1 - T.def) * 100)}%</td><td class="n">${T.foot > 90 ? "—" : T.foot}</td>
        <td class="n">${T.tread > 90 ? "—" : T.tread}</td><td class="n">${T.air}</td><td>${T.desc}</td></tr>`).join("");
     $("manual").innerHTML = `
-      <h3>Units — four categories, two units each</h3>
-      <p><b>FOOT</b> units walk (and can climb mountains). <b>TREAD</b> vehicles are faster on roads but can't enter mountains. <b>AIR</b> ignores terrain.
-      ATK is base damage to a target class: <b>soft</b> (Infantry), <b>armor</b> (IFV, AFV, MBT), <b>hard</b> (MRL, SAM), or <b>air</b> (helicopters, fighters). Damage scales with attacker HP and is reduced by terrain.
-      Every unit can damage a Fighter for at least 1. Fighter attacks use their full attack values.</p>
-      <div class="scroll-x"><table class="tbl"><tr><th>Unit</th><th>Move type</th><th class="n">HP</th><th class="n">Cost</th><th class="n">Move</th><th class="n">Rng</th><th class="n">Vis</th></tr>${rows}</table></div>
+      <h3>Tier ${tier} — ${tierInfo[tier] || ""}</h3>
+      <p>${sysNotes}</p>
+      <h3>Unit database</h3>
+      <input id="udb-search" class="chat-in" placeholder="🔍 search units — name, code, class, category…" style="margin-bottom:8px">
+      <div class="scroll-x"><table class="tbl" id="udb"><tr><th>Unit</th><th>Class</th><th class="n">HP</th>
+        <th class="n">Move</th><th class="n">Cost</th><th class="n">Rng</th><th class="n">Vis</th>
+        <th class="n">Sft</th><th class="n">Arm</th><th class="n">Hrd</th><th class="n">Air</th><th class="n">Sea</th>
+        <th>Built at</th><th class="n">Turns</th></tr>${udbRows}</table></div>
+      <h3>Attack values by target class</h3>
+      <p><b>FOOT</b> units walk (and climb mountains). <b>TREAD</b> vehicles can't enter mountains. <b>AIR</b> and <b>SEA</b> ignore terrain.
+      ATK values are base damage per target class at full HP: <b>soft</b> (infantry teams), <b>armor</b> (IFV, AFV, MBT, HT), <b>hard</b> (vehicles, guns, ships), <b>air</b> (aircraft), <b>sea</b> (warships). Damage scales with attacker HP and terrain. Every unit damages a Fighter for at least 1.</p>
       <h3>Attack values by target class</h3>
       <p>Base damage at full HP. All units deal at least 1 damage to Fighters.</p>
       <div class="scroll-x"><table class="tbl"><tr><th>Attacker</th><th class="n">Soft · INF</th><th class="n">Armor · IFV/AFV/MBT</th>
-      <th class="n">Hard · MRL/SAM</th><th class="n">Air · HEL/FTR</th></tr>${attackRows}</table></div>
+      <th class="n">Hard · MRL/SAM</th><th class="n">Air · HEL/FTR</th><th class="n">Sea · ships</th></tr>${attackRows}</table></div>
       <h3>Terrain</h3>
       <p>Numbers are movement points spent per tile. Roads cost only 0.5 for ground units.</p>
       <div class="scroll-x"><table class="tbl"><tr><th>Tile</th><th class="n">Def</th><th class="n">Foot</th><th class="n">Tread</th><th class="n">Air</th><th>Notes</th></tr>${terr}</table></div>
       <h3>Economy &amp; repair</h3>
       <p>Income per turn: HQ ${META.income.HQ}, factory ${META.income.factory}, city ${META.income.city} (+50% per building level). Founding a new factory costs <b>${META.found_cost}</b>; upgrades cost ${META.upgrade_base} × level.
       Units on a friendly city/factory/HQ repair at the start of your turn (+${META.heal.city}/+${META.heal.factory}/+${META.heal.HQ} HP, +1 per building level above 1) for credits. Aircraft can't repair in cities.
-      Direct-fire defenders counter for ${Math.round(META.counter * 100)}% damage. Fog of war hides what your units and buildings can't see; moving into an unseen enemy triggers an ambush and halts you.</p>`;
+      Direct-fire defenders counter for ${Math.round(META.counter * 100)}% damage. Fog of war hides what your units and buildings can't see; moving into an unseen enemy triggers an ambush and halts you.
+1000 Iron Marshal.</p>`;
+    const udbS = $("udb-search");
+    if (udbS) udbS.addEventListener("input", () => {
+      const q = udbS.value.trim().toLowerCase();
+      document.querySelectorAll("#udb tr[data-k]").forEach(tr => {
+        tr.style.display = !q || tr.dataset.k.toLowerCase().includes(q) ? "" : "none";
+      });
+    });
   }
 
   // ---------------------------------------------------------------- actions
@@ -442,9 +687,24 @@
     catch (e) { err(e); updateInfo(); }
   }
   async function doWait(id) { sel = null; try { loadState((await api("/api/wait", { unit: id })).state); } catch (e) { err(e); } }
-  async function doBuild(x, y, type) { try { const j = await api("/api/build", { x, y, type }); loadState(j.state); beep("select"); selB = buildingAt(x, y); updateInfo(); } catch (e) { err(e); } }
+  async function doBuild(x, y, type) { try { const j = await api("/api/build", { x, y, type }); loadState(j.state); beep("build"); selB = buildingAt(x, y); updateInfo(); } catch (e) { err(e); } }
   async function doUpgrade(x, y) { try { const j = await api("/api/upgrade", { x, y }); loadState(j.state); selB = buildingAt(x, y); updateInfo(); } catch (e) { err(e); } }
   async function doFound(id) { try { const j = await api("/api/found", { unit: id }); sel = null; loadState(j.state); } catch (e) { err(e); } }
+  async function doLoad(id) {
+    sel = null;
+    try { loadState((await api("/api/load", { unit: id })).state); beep("move"); }
+    catch (e) { err(e); }
+  }
+  async function doUnload(id, x, y) {
+    sel = null;
+    try { loadState((await api("/api/unload", { unit: id, x, y })).state); beep("move"); }
+    catch (e) { err(e); }
+  }
+  async function doConstruct(id, kind, x, y) {
+    sel = null;
+    try { const j = await api("/api/construct", { unit: id, kind, x, y }); loadState(j.state); beep("select"); }
+    catch (e) { err(e); }
+  }
   async function showEvents(events) {
     for (const e of events || []) {
       if (e.t === "combat") {
@@ -452,14 +712,86 @@
         if (e.counter && e.a) pop(e.a.x, e.a.y, "↩-" + e.counter, "#ffb454");
         beep(e.dk ? "kill" : "hit"); await sleep(260);
       } else if (e.t === "capture") { pop(e.x, e.y, "CAPTURED", "#4dff9d"); beep("capture"); }
-      else if (e.t === "ambush") pop(e.x, e.y, "AMBUSH!", "#ff6b6b");
+      else if (e.t === "ambush") { pop(e.x, e.y, "AMBUSH!", "#ff6b6b"); beep("contact"); }
+      else if (e.t === "capprog") { pop(e.x, e.y, `CAP ${e.pts}/${e.need}`, e.side === "P" ? "#4dff9d" : "#ff6b6b"); beep("capture"); }
+      else if (e.t === "bldhit") { pop(e.x, e.y, e.dk ? "DESTROYED" : "-" + e.dmg, e.dk ? "#ff6b6b" : "#ffb454"); beep(e.dk ? "kill" : "hit"); }
     }
+  }
+
+  // ------------------------------------------------------- multiplayer watch: no manual refresh needed
+  let oppPoll = null;
+  function watchOpponent() {
+    const inPvp = state && !state.over && state.level === "pvp";
+    if (inPvp && !oppPoll) oppPoll = setInterval(pollTick, 3000);
+    else if (!inPvp && oppPoll) { clearInterval(oppPoll); oppPoll = null; }
+  }
+  async function pollTick() {
+    if (busy || !state || state.over) return;
+    pollChat();
+    if (state.your_turn === false) pollOpponent();
+  }
+  async function pollOpponent() {
+    try {
+      const j = await api("/api/state");
+      const wasWaiting = state.your_turn === false;
+      loadState(j.state);
+      if (wasWaiting && j.state.your_turn && !j.state.over) {
+        toast(`Your move — ${j.state.opponent || "your opponent"} has ended their turn.`, "good");
+        beep("turn");
+      }
+    } catch (e) { /* server hiccup — retry on next tick */ }
+  }
+
+  // ------------------------------------------------------- battle comms (in-memory PvP chat)
+  let chatCount = 0;
+  function renderChat() {
+    const log = $("chat-log");
+    if (!state || state.level !== "pvp") {
+      log.innerHTML = `<div class="empty">Comms are available in multiplayer battles.</div>`;
+      return;
+    }
+    api("/api/chat").then(j => {
+      chatCount = j.n;
+      if (!j.msgs.length) {
+        log.innerHTML = `<div class="empty">No messages yet — say hello, commander.</div>`;
+        return;
+      }
+      let html = "";
+      for (const m of j.msgs) {
+        html += `<div class="chat-row${m.s === "P" ? " mine" : ""}"><b>${esc(m.u)}</b> ` +
+                `<span class="muted">${m.t}</span><br>${esc(m.x)}</div>`;
+      }
+      log.innerHTML = html;
+      log.scrollTop = log.scrollHeight;
+    }).catch(() => {});
+  }
+  async function pollChat() {
+    if (!state || state.over || state.level !== "pvp") return;
+    try {
+      const j = await api("/api/chat?after=" + chatCount);
+      if (!j.msgs.length) return;
+      const had = chatCount > 0;
+      chatCount = j.n;
+      renderChat();
+      const last = j.msgs[j.msgs.length - 1];
+      if (had && last.s !== "P") {
+        toast(`New message from ${last.u}.`, "good");
+        beep("msg");
+      }
+    } catch (e) { /* ignore */ }
+  }
+  async function sendChat() {
+    const inp = $("chat-in"), txt = inp.value.trim();
+    if (!txt) return;
+    inp.value = "";
+    try { await api("/api/chat", { text: txt }); renderChat(); }
+    catch (e) { toast(e.message, "bad"); }
   }
 
   // ---------------------------------------------------------------- end turn & AI replay
   function idleUnits() { return myUnits().filter(u => !u.acted && !(u.moved && !U(u.type).move_fire)).length; }
   function requestEndTurn() {
-    if (busy || !state || state.over) return;
+    if (busy || !state || state.over || state.your_turn === false) return;
     const idle = idleUnits();
     if (settings.confirmEnd && idle > 0) {
       confirmDialog(`End turn ${state.turn}?`, `${idle} unit${idle > 1 ? "s have" : " has"} not acted yet.`, [
@@ -468,7 +800,7 @@
     } else endTurn();
   }
   async function endTurn() {
-    if (busy || !state || state.over) return;
+    if (busy || !state || state.over || state.your_turn === false) return;
     busy = true; sel = null; selB = null; updateTop(); updateInfo(); beep("turn");
     try {
       const j = await api("/api/end_turn", { autosave: settings.autosave });
@@ -487,7 +819,7 @@
       anim = { id: u.id, fx: e.from[0], fy: e.from[1], tx: e.to[0], ty: e.to[1], start: performance.now(), dur: speed(380) || 1 };
       await sleep(400); u.x = e.to[0]; u.y = e.to[1]; anim = null;
       if (!e.to_vis) state.units = state.units.filter(x => x.id !== u.id);
-      else if (!e.from_vis) { pop(e.to[0], e.to[1], "CONTACT", "#ff6b6b"); beep("hit"); }
+      else if (!e.from_vis) { pop(e.to[0], e.to[1], "CONTACT", "#ff6b6b"); beep("contact"); }
     } else if (e.t === "combat") {
       const d = findUnit(e.d.id), a = e.a && findUnit(e.a.id);
       if (d) d.hp = e.d_hp1; if (a) a.hp = e.a_hp1;
@@ -499,7 +831,7 @@
     } else if (e.t === "capture") {
       const b = buildingAt(e.x, e.y); if (b) { b.side = e.side; b.visible = true; }
       pop(e.x, e.y, "CAPTURED", e.side === "P" ? "#4dff9d" : "#ff6b6b"); beep("capture"); await sleep(420);
-    } else if (e.t === "ambush") { pop(e.x, e.y, "AMBUSH!", "#4dff9d"); await sleep(350); }
+    } else if (e.t === "ambush") { pop(e.x, e.y, "AMBUSH!", "#4dff9d"); beep("contact"); await sleep(350); }
     else if (e.t === "heal") { const u = findUnit(e.id); if (u) u.hp = e.hp; pop(e.x, e.y, "+" + e.amt, "#4dff9d"); beep("heal"); await sleep(160); }
   }
 
@@ -529,17 +861,59 @@
   }
 
   // new operation
+  function orderedLevels() {
+    const source = META && META.levels ? META.levels : {};
+    const order = Array.isArray(META && META.ai_order) ? META.ai_order : Object.keys(source);
+    const ordered = [];
+    for (const lvl of order) {
+      if (Object.prototype.hasOwnProperty.call(source, lvl)) ordered.push([lvl, source[lvl]]);
+    }
+    for (const [lvl, desc] of Object.entries(source)) {
+      if (!order.includes(lvl)) ordered.push([lvl, desc]);
+    }
+    return ordered;
+  }
+
   function requestNew() {
     if (!state) return;
-    if (state.over) { openLevelModal(); return; }
+    if (state.over) { location.href = "/lobby"; return; }
     confirmDialog("Abandon this operation?", `Turn ${state.turn} is in progress. Unsaved progress will be lost.`, [
       { label: "Save first", hot: "s", cls: "good", fn: () => openSaves() },
-      { label: "Abandon", hot: "a", cls: "danger", fn: openLevelModal },
+      { label: "Abandon & go to lobby", hot: "l", cls: "danger", fn: abandonOperation },
       { label: "Cancel", hot: "c", fn: () => {} }]);
   }
+  async function abandonOperation() {
+    try {
+      await api(`/api/game/${state.id}/abandon`, {});
+      location.href = "/lobby";
+    } catch (e) { err(e); }
+  }
+  function tierUnits() {
+    const t = state && META.tiers && META.tiers[state.tier] ? state.tier : 2;
+    return (META.tiers && META.tiers[t]) ? META.tiers[t].units : META.order;
+  }
+
   function openLevelModal() {
     const box = $("level-list"); box.innerHTML = "";
-    Object.entries(META.levels).forEach(([lvl, desc], i) => {
+    const ts = document.createElement("select");
+    ts.className = "form-select"; ts.id = "tier-pick"; ts.style.marginBottom = "10px";
+    ts.innerHTML = Object.entries(META.tiers).map(([t, v]) =>
+      `<option value="${t}">Tier ${t} — ${v.name} (${v.units.length} units)</option>`).join("");
+    box.appendChild(ts);
+    const ds = document.createElement("select");
+    ds.className = "form-select"; ds.id = "doc-pick"; ds.style.marginBottom = "10px";
+    ds.innerHTML = (META.doctrine_order || []).map(k =>
+      `<option value="${k}">${META.doctrines[k]}</option>`).join("");
+    box.appendChild(ds);
+    const syncDocRow = () => { ds.style.display = +ts.value >= 4 ? "" : "none"; };
+    ts.addEventListener("change", syncDocRow);
+    syncDocRow();
+    const ms = document.createElement("select");
+    ms.className = "form-select"; ms.id = "map-pick"; ms.style.marginBottom = "10px";
+    ms.innerHTML = `<option value="-1">🎲 Random battlefield</option>` +
+      META.maps.map((m, i) => `<option value="${i}">Map ${i + 1} — ${m.name} (${m.w || 14}×${m.h || 10})</option>`).join("");
+    box.appendChild(ms);
+    orderedLevels().forEach(([lvl, desc], i) => {
       const b = document.createElement("button");
       b.className = "btn-ig" + (lvl === settings.level ? " primary" : ""); b.dataset.hot = String(i + 1);
       if (lvl === settings.level) b.dataset.first = "1";
@@ -553,7 +927,9 @@
   async function newGame(level) {
     busy = false; sel = null; selB = null; floats = []; anim = null;
     try {
-      const j = await api("/api/new", { level });
+      const mp = $("map-pick"), tp = $("tier-pick"), dp = $("doc-pick");
+      const j = await api("/api/new", { level, map: mp ? +mp.value : 0, tier: tp ? +tp.value : 2,
+                                        doctrine: dp ? dp.value : "territ" });
       settings.level = level; saveSettings();
       loadState(j.state);
       const first = myUnits().find(u => !u.acted);
@@ -567,7 +943,11 @@
     { k: "keyboard", t: "bool", l: "Keyboard control", d: "Play with the keyboard only: cursor, hotkeys, build menu." },
     { k: "theme", t: "sel", l: "Theme", d: "Dark, light, or follow your system.", o: [["dark", "Dark"], ["light", "Light"], ["auto", "System"]] },
     { k: "level", t: "sel", l: "Default AI level", d: "Used for the next new operation.", o: "levels" },
-    { k: "anim", t: "sel", l: "Animation speed", d: "Enemy-turn replay speed.", o: [["normal", "Normal"], ["fast", "Fast"], ["off", "Instant"]] },
+    { k: "animspeed", t: "range", l: "Animation speed", d: "0 = instant, 100 = fastest.", min: 0, max: 100 },
+    { k: "volume", t: "range", l: "Master volume", d: "Overall loudness of all sounds.", min: 0, max: 100 },
+    { k: "zoombar", t: "bool", l: "Zoom controls", d: "Show the zoom / fit / reset bar above the battlefield." },
+    { k: "readycounter", t: "bool", l: "Ready-unit counter", d: "Persistent 'Ready x / Used y' count in the top bar." },
+    { k: "hoverfx", t: "bool", l: "Hover combat forecast", d: "Show damage preview when hovering a target." },
     { k: "autosave", t: "bool", l: "Autosave each turn", d: "Keeps one rolling autosave in the database." },
     { k: "confirmEnd", t: "bool", l: "Confirm end turn", d: "Ask first if some units haven't acted." },
     { k: "cvd", t: "bool", l: "Colorblind palette", d: "Blue vs orange instead of blue vs red." },
@@ -584,13 +964,42 @@
         ctl = document.createElement("div"); ctl.className = "form-check form-switch";
         ctl.innerHTML = `<input class="form-check-input" type="checkbox" role="switch" ${settings[s.k] ? "checked" : ""}>`;
         ctl.firstChild.addEventListener("change", e => { settings[s.k] = e.target.checked; saveSettings(); applySettings(); });
+      } else if (s.t === "range") {
+        ctl = document.createElement("div"); ctl.style.cssText = "display:flex;align-items:center;gap:10px;min-width:220px";
+        const rng = document.createElement("input");
+        rng.type = "range"; rng.min = s.min; rng.max = s.max; rng.value = settings[s.k];
+        rng.className = "form-range";
+        const lbl = document.createElement("b"); lbl.style.minWidth = "2.4em"; lbl.style.textAlign = "right";
+        lbl.textContent = settings[s.k];
+        rng.addEventListener("input", () => {
+          settings[s.k] = +rng.value; lbl.textContent = rng.value; saveSettings(); applySettings();
+        });
+        ctl.append(rng, lbl);
       } else {
         ctl = document.createElement("select"); ctl.className = "form-select form-select-sm";
-        const opts = s.o === "levels" ? Object.keys(META.levels).map(k => [k, k[0].toUpperCase() + k.slice(1)]) : s.o;
+        const opts = s.o === "levels" ? orderedLevels().map(([k, _]) => [k, k[0].toUpperCase() + k.slice(1)]) : s.o;
         ctl.innerHTML = opts.map(([v, n]) => `<option value="${v}" ${settings[s.k] === v ? "selected" : ""}>${n}</option>`).join("");
         ctl.addEventListener("change", e => { settings[s.k] = e.target.value; saveSettings(); applySettings(); });
       }
       row.appendChild(ctl); box.appendChild(row);
+    }
+    const head = document.createElement("div");
+    head.className = "setrow";
+    head.innerHTML = `<div class="lbl"><b>Sound channels</b><span>Master switch is "Sound effects" above — fine-tune each sound here.</span></div><span></span>`;
+    box.appendChild(head);
+    for (const [k, label] of Object.entries(SND_CHANNELS)) {
+      const row = document.createElement("div"); row.className = "setrow";
+      row.innerHTML = `<div class="lbl"><span>${label}</span></div>`;
+      const ctl = document.createElement("div"); ctl.style.cssText = "display:flex;align-items:center;gap:10px";
+      const sw = document.createElement("div"); sw.className = "form-check form-switch";
+      sw.innerHTML = `<input class="form-check-input" type="checkbox" role="switch" ${settings.snd[k] ? "checked" : ""}>`;
+      sw.firstChild.addEventListener("change", e => { settings.snd[k] = e.target.checked; saveSettings(); });
+      const vol = document.createElement("input");
+      vol.type = "range"; vol.min = 0; vol.max = 100; vol.value = Math.round((settings.sndvol[k] ?? 1) * 100);
+      vol.className = "form-range"; vol.style.width = "140px";
+      vol.title = "Loudness";
+      vol.addEventListener("input", () => { settings.sndvol[k] = +vol.value / 100; saveSettings(); });
+      ctl.append(sw, vol); row.appendChild(ctl); box.appendChild(row);
     }
     openModal("modal-settings");
   }
@@ -650,22 +1059,21 @@
     $("end-title").textContent = win ? "VICTORY" : "DEFEAT";
     $("end-title").className = win ? "" : "defeat";
     $("end-reason").textContent = s.result.reason + (win ? ` on turn ${s.turn}.` : ".");
-    $("record-row").classList.toggle("hidden", !s.can_record);
+    $("end-note").textContent = s.rank_note || "";
     $("end-overlay").classList.remove("hidden");
-    if (s.can_record) setTimeout(() => $("cmdr-name").focus(), 50);
   }
-  $("save-record").addEventListener("click", async () => {
-    try {
-      const j = await api("/api/records", { name: $("cmdr-name").value.trim() || "Anon" });
-      state.can_record = false; $("record-row").classList.add("hidden"); renderHof(j.records); showTab("records");
-    } catch (e) { err(e); }
-  });
   async function refreshHof() { try { renderHof((await api("/api/records")).records); } catch (e) {} }
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   function renderHof(recs) {
-    $("hof").innerHTML = !recs.length ? `<tr><td class="muted">No verified victories yet.</td></tr>` :
-      `<tr><th>#</th><th>Commander</th><th>AI</th><th class="n">Turns</th><th class="n">Kills</th><th class="n">Left</th><th>Date</th></tr>` +
-      recs.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${esc(r.level)}</td><td class="n">${r.turns}</td><td class="n">${r.kills}</td><td class="n">${r.units_left}</td><td>${esc(r.date)}</td></tr>`).join("");
+    if (!recs.length) { $("hof").innerHTML = `<tr><td class="muted">No verified victories yet.</td></tr>`; return; }
+    let lastLvl = null, place = 0;
+    const rows = recs.map(r => {
+      if (r.level !== lastLvl) { lastLvl = r.level; place = 0; }
+      place += 1;
+      return `<tr><td>${place}</td><td>${esc(r.level)}</td><td>${esc(r.name)}</td><td>${esc(r.rank_title || "")}</td>` +
+        `<td class="n">${r.turns}</td><td class="n">${r.kills}</td><td class="n">${r.units_left}</td><td>${esc(r.date)}</td></tr>`;
+    }).join("");
+    $("hof").innerHTML = `<tr><th>#</th><th>AI</th><th>Commander</th><th>Rank</th><th class="n">Turns</th><th class="n">Kills</th><th class="n">Left</th><th>Date</th></tr>` + rows;
   }
 
   // ---------------------------------------------------------------- export board
@@ -674,7 +1082,7 @@
     c.width = cw; c.height = ch + bh; const t = c.getContext("2d"), P = pal();
     t.fillStyle = P.bg; t.fillRect(0, 0, c.width, c.height);
     t.fillStyle = P.text; t.font = "bold 14px system-ui"; t.textBaseline = "middle"; t.textAlign = "left";
-    t.fillText(`IRON GRID — turn ${state.turn} — AI: ${state.level} — ${myUnits().length} units — ${state.credits} cr`, 8, bh / 2);
+    t.fillText(`IRON GRID — turn ${state.turn} — ${state.level === "pvp" ? "PvP" : "AI: " + state.level} — ${myUnits().length} units — ${state.credits} cr`, 8, bh / 2);
     t.translate(0, bh); drawScene(t, false);
     c.toBlob(b => { const a = document.createElement("a"); a.href = URL.createObjectURL(b);
       a.download = `irongrid-turn-${state.turn}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); });
@@ -686,6 +1094,7 @@
     document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
     document.querySelectorAll(".tabpane").forEach(p => p.classList.toggle("hidden", p.id !== "tab-" + name));
     if (name === "records") refreshHof();
+    if (name === "chat") renderChat();
   }
   document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
@@ -696,14 +1105,28 @@
     const x = Math.floor(((e.clientX - r.left) * sx - LAB) / TILE), y = Math.floor(((e.clientY - r.top) * sy - LAB) / TILE);
     return (x >= 0 && y >= 0 && x < W && y < H) ? { x, y } : null;
   }
+  const unitsAt = (x, y) => state.units
+    .filter(u => u.x === x && u.y === y)
+    .sort((a, b) => (b.side === "P") - (a.side === "P"));   // yours first
+  let lastPick = null;
   async function activate(x, y, fromKeys) {
     if (busy || !state || state.over) return;
+    const myTurn = state.your_turn !== false;      // on the opponent's turn: inspect only
     cursor = { x, y };
-    const u = unitAt(x, y);
-    if (sel) {
+    const stack = unitsAt(x, y);
+    let u = stack[0] || null;
+    if (stack.length > 1 && lastPick && lastPick.x === x && lastPick.y === y) {
+      const i = stack.findIndex(q => q.id === lastPick.id);   // click again: next occupant
+      u = stack[(Math.max(i, 0) + 1) % stack.length];
+      sel = null;
+    }
+    lastPick = u ? { x, y, id: u.id } : null;
+    if (sel && myTurn) {
       if (u && u.side === "A" && sel.attacks.has(u.id)) return doAttack(u.id);
+      const bb = u ? null : buildingAt(x, y);
+      if (bb && sel.attacks.has(bb.id)) return doAttack(bb.id);
       if (sel.moves.has(key(x, y))) return doMove(x, y);
-      if (u && u.id === sel.unit.id && fromKeys) return doWait(u.id);
+      if (u && u.id === sel.unit.id && fromKeys && myTurn) return doWait(u.id);
     }
     if (u) {
       sel = null; selB = null;
@@ -715,6 +1138,7 @@
     if (b) { selB = b; showBuildingInfo(b); beep("select"); } else showTerrainInfo(x, y);
   }
   canvas.addEventListener("click", e => {
+    if (panned) { panned = false; return; }
     canvas.focus({ preventScroll: true });
     const t = tileFromEvent(e); if (t) activate(t.x, t.y, false);
   });
@@ -756,12 +1180,17 @@
     const k = e.key, lk = k.length === 1 ? k.toLowerCase() : k;
     const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[k];
     if (move) { e.preventDefault(); cursor = { x: Math.min(W - 1, Math.max(0, cursor.x + move[0])), y: Math.min(H - 1, Math.max(0, cursor.y + move[1])) }; updateStatusline(); beep("select"); return; }
+    if (k === "+" || k === "=") { zoomBy(1.25); return; }
+    if (k === "-") { zoomBy(0.8); return; }
     if (k === "Enter" || k === " ") { if (tag === "button") return; e.preventDefault(); activate(cursor.x, cursor.y, true); return; }
     if (k === "Escape") { cancelSel(); return; }
     if (k === "Tab") { e.preventDefault(); cycleReady(e.shiftKey ? -1 : 1); return; }
     if (busy) return;
+    const bu = tierUnits();
     if (lk >= "1" && lk <= "8" && selB && selB.side === "P" && ["HQ", "factory"].includes(selB.type)) {
-      doBuild(selB.x, selB.y, META.order[+lk - 1]); return;
+      const k = bu[+lk - 1];
+      if (k) doBuild(selB.x, selB.y, k);
+      return;
     }
     switch (lk) {
       case "t": cycleTarget(); break;
@@ -778,32 +1207,47 @@
       case "l": showTab("log"); break;
       case "m": showTab("manual"); break;
       case "r": showTab("records"); break;
+      case "c": showTab("chat"); break;
       case "p": exportBoard(); break;
     }
   });
 
   // ---------------------------------------------------------------- wiring
-  $("end-turn").addEventListener("click", requestEndTurn);
-  $("btn-new").addEventListener("click", requestNew);
-  $("rematch").addEventListener("click", requestNew);
-  $("btn-saves").addEventListener("click", openSaves);
-  $("btn-settings").addEventListener("click", openSettings);
-  $("btn-help").addEventListener("click", openHelp);
-  $("btn-export").addEventListener("click", exportBoard);
-  $("modal-new-cancel").addEventListener("click", () => closeModal("modal-new"));
-  $("settings-close").addEventListener("click", () => closeModal("modal-settings"));
-  $("saves-close").addEventListener("click", () => closeModal("modal-saves"));
-  $("help-close").addEventListener("click", () => closeModal("modal-help"));
-  $("cmdr-name").addEventListener("keydown", e => { if (e.key === "Enter") $("save-record").click(); });
+  const wire = (id, fn) => {
+    const el = $(id);
+    if (el) el.addEventListener("click", fn);
+  };
+
+  wire("end-turn", requestEndTurn);
+  wire("btn-new", requestNew);
+  wire("rematch", () => { location.href = "/lobby"; });
+  wire("lobby-return", () => { location.href = "/lobby"; });
+  wire("btn-saves", openSaves);
+  wire("btn-settings", openSettings);
+  wire("btn-help", openHelp);
+  wire("btn-export", exportBoard);
+  wire("modal-new-cancel", () => closeModal("modal-new"));
+  wire("settings-close", () => closeModal("modal-settings"));
+  wire("saves-close", () => closeModal("modal-saves"));
+  wire("help-close", () => closeModal("modal-help"));
+  wire("chat-send", sendChat);
+  $("chat-in").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
+  wire("zoom-in", () => zoomBy(1.25));
+  wire("zoom-out", () => zoomBy(0.8));
+  wire("zoom-fit", zoomFit);
+  wire("zoom-reset", zoomReset);
 
   (async function boot() {
     applySettings();
     try {
       META = await api("/api/meta");
-      W = META.w; H = META.h; TERRAIN = META.map;
+      if (!META.levels[settings.level]) settings.level = "medium";   // old saved level name
+      if (META.version) document.querySelector(".brand small").textContent = "V" + META.version;
+      W = META.w; H = META.h; TERRAIN = META.maps ? META.maps[0].terrain : META.map;
       canvas.width = LAB + W * TILE; canvas.height = LAB + H * TILE;
       buildManual(); buildFilters(); refreshHof();
       loadState((await api("/api/state")).state);
+      refreshCmdr();
       const first = myUnits().find(u => !u.acted);
       if (first) cursor = { x: first.x, y: first.y };
       canvas.focus({ preventScroll: true });

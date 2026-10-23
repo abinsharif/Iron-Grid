@@ -5,4 +5,3 @@ __pycache__/
 venv/
 irongrid.db
 irongrid.db-*
-records.json

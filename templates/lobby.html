@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a0e15">
+  <title>IRON GRID V4 — Lobby</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="hud">
+    <div class="brand">IRON<span>GRID</span><small id="lobby-ver">V4 · LOBBY</small></div>
+    <div class="stats" id="me-stats" style="display:none">
+      <div class="stat"><span class="k">CMDR</span><b id="me-name">—</b></div>
+      <div class="stat"><span class="k">RANK</span><b id="me-rank">0</b><i id="me-title">Beginner</i></div>
+      <div class="stat"><span class="k">W / L</span><b id="me-wl">0 / 0</b></div>
+      <div class="stat"><span class="k">RATING · TIER</span>
+        <select id="rank-tier-sel" class="form-select form-select-sm" style="width:auto;min-width:70px;padding:2px 8px">
+          <option value="1">T1</option><option value="2" selected>T2</option><option value="3">T3</option>
+          <option value="4">T4</option><option value="5">T5</option><option value="6">T6</option>
+        </select>
+        <b id="me-trank">—</b><i id="me-ttitle"></i></div>
+    </div>
+    <nav class="actions">
+      <button id="btn-battle" class="btn-ig primary hidden">Battlefield</button>
+      <button id="btn-refresh" class="btn-ig hidden">Refresh</button>
+      <button id="btn-logout" class="btn-ig danger hidden">Log out</button>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <section id="lobby-loading" class="board-col" role="status" aria-live="polite">
+      <p class="muted">Checking commander session...</p>
+    </section>
+
+    <section id="auth-view" class="board-col hidden">
+      <div class="panel auth-wrap">
+        <h2 id="auth-title">Sign in</h2>
+        <div class="stack">
+          <input id="auth-name" maxlength="16" placeholder="Commander name" autocomplete="username">
+          <input id="auth-pass" type="password" maxlength="64" placeholder="Password" autocomplete="current-password">
+          <div id="auth-err" class="auth-err"></div>
+          <button id="auth-go" class="btn-ig primary">Sign in</button>
+          <button id="auth-switch" class="btn-ig">Need an account? Register</button>
+        </div>
+        <p class="muted" style="font-size:.82rem">Accounts live in irongrid.db on this machine.
+        Anyone on the LAN can register from their own device against this server.</p>
+      </div>
+    </section>
+
+    <section id="lobby-view" class="side hidden" style="max-width:780px; flex:1 1 720px">
+      <div class="card-ig">
+        <h3>NEW OPERATION VS AI</h3>
+        <div class="wiz-track" id="wiz-track">
+          <span class="wiz-dot on" data-step="1">1 · Tier</span>
+          <span class="wiz-dot" data-step="2">2 · Map</span>
+          <span class="wiz-dot" data-step="3">3 · Enemy</span>
+        </div>
+        <div id="wiz-tier" class="wiz-grid"></div>
+        <div id="wiz-map" class="wiz-grid hidden"></div>
+        <div id="wiz-doc" class="hidden" style="margin:10px 0">
+          <label class="muted" style="font-size:.8rem">Doctrine (tier 4+)</label>
+          <select id="doc-sel" class="form-select"></select>
+        </div>
+        <div id="wiz-ai" class="stack hidden"></div>
+        <div class="row-gap" style="justify-content:flex-start;margin-top:10px">
+          <button id="wiz-back" class="btn-ig sm hidden">← Back</button>
+          <span class="muted" id="wiz-hint" style="font-size:.8rem"></span>
+        </div>
+      </div>
+      <div class="card-ig">
+        <h3>PLAYERS ONLINE <small class="muted">last 90 seconds, this LAN</small></h3>
+        <div id="player-list" class="plist"><div class="muted">Nobody else online right now.</div></div>
+      </div>
+      <div class="card-ig">
+        <h3>YOUR BATTLES &amp; OPEN CHALLENGES</h3>
+        <div id="game-list" class="plist"><div class="muted">No multiplayer battles yet.</div></div>
+      </div>
+      <div class="card-ig">
+        <h3>HALL OF FAME <small class="muted">top 3 verified wins per AI doctrine, all commanders</small></h3>
+        <div class="scroll-x"><table id="hof" class="tbl"></table></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/lobby.js') }}"></script>
+</body>
+</html>
