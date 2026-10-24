@@ -2,8 +2,16 @@
 
 from gamedata import *
 
-AIR_FUEL = {"th": 40}
+AIR_FUEL = {"th": 55, "heli": 45, "drone": 55, "uav": 60, "td": 60,
+            "jet": 70, "asf": 70, "intr": 70, "sb": 85}
 FUEL_MAX = 32
+
+
+def fuel_for(game, utype):
+    """Aircraft fuel by type (helicopters workhorses, bombers farthest) plus theater scaling."""
+    w, h = dims(game)
+    base = FUEL_TABLE.get(utype, FUEL_MAX)
+    return base + max(0, (w * h - W * H)) // 16
 
 DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
@@ -84,8 +92,15 @@ def snap(u):
 
 
 
+def building_functional(b):
+    return not b.get("max_hp") or b["hp"] > b["max_hp"] // 2
+
+
 def building_income(b):
-    return int(BASE_INCOME[b["type"]] * (1 + 0.5 * (b.get("level", 1) - 1)))
+    base = BASE_INCOME.get(b["type"], 0) * (1 + 0.5 * (b.get("level", 1) - 1))
+    if b.get("max_hp"):
+        base *= b["hp"] / b["max_hp"]           # income tracks structural health, never zero
+    return int(base)
 
 
 
@@ -95,7 +110,7 @@ def income_of(game, side):
 
 
 def heal_amount(b):
-    return HEAL[b["type"]] + (b.get("level", 1) - 1)
+    return HEAL.get(b["type"], 0) + (b.get("level", 1) - 1)
 
 
 
@@ -110,15 +125,19 @@ def tile_def(game, x, y):
 
 def in_rng(utype, dist):
     r = UNITS[utype]["rng"]
+    if dist == 0:
+        return r[0] == 1          # direct-fire units can hit an enemy stacked on their tile
     return r[0] <= dist <= r[1]
 
 
 
 def attack_base(atype, dtype):
-    base = ATTACK[atype][TARGET_CLASS[dtype]]
-    if base <= 0:
-        return 0
-    return max(FIGHTER_MIN_DAMAGE, base) if dtype == "jet" else base
+    return ATTACK[atype][TARGET_CLASS[dtype]]
+
+
+def building_attack(atype):
+    """Dedicated building-damage value (the sixth attack class)."""
+    return ATTACK[atype].get("bld", 0)
 
 
 

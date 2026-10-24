@@ -1,7 +1,10 @@
 """Tier 3 - Engineers rules. Two-step captures, field construction."""
 TIER = 3
 CAPTURE_NEED = {"HQ": 3}
-CONSTRUCT = {"road": 100, "rail": 200, "fort": 300, "bridge": 250}
+CONSTRUCT = {"road": 100, "rail": 200, "fort": 300, "bridge": 250,
+             "airfield": 1500,       # engineers raise an airfield
+             "battery": 800,         # coastal gun emplacement
+             "port": 1200}           # coastal embarkation/trade harbor
 
 def capture_need(btype):
     return CAPTURE_NEED.get(btype, 2)

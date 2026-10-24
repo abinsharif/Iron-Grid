@@ -67,6 +67,7 @@
         <button class="tab" data-tab="log" role="tab">Logbook <kbd>L</kbd></button>
         <button class="tab" data-tab="manual" role="tab">Manual <kbd>M</kbd></button>
         <button class="tab" data-tab="records" role="tab">Records <kbd>R</kbd></button>
+        <button class="tab" data-tab="units" role="tab">Units <kbd>U</kbd></button>
         <button class="tab" data-tab="chat" role="tab">Comms <kbd>C</kbd></button>
       </div>
 
@@ -91,6 +92,15 @@
       <section id="tab-records" class="tabpane card-ig hidden" role="tabpanel">
         <h3>HALL OF FAME <small class="muted">top 3 wins per AI · all commanders</small></h3>
         <div class="scroll-x"><table id="hof" class="tbl"></table></div>
+      </section>
+
+      <section id="tab-units" class="tabpane card-ig hidden" role="tabpanel">
+        <h3>UNIT DATABASE</h3>
+        <div id="udb-tabs" class="chips" style="margin-bottom:8px"></div>
+        <div class="udb-body">
+          <div id="udb-list"></div>
+          <div id="udb-dossier" class="info">Select a unit.</div>
+        </div>
       </section>
 
       <section id="tab-chat" class="tabpane card-ig hidden" role="tabpanel">

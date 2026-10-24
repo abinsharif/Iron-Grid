@@ -128,8 +128,17 @@
   const findUnit = id => state.units.find(u => u.id === id);
   const unitAt = (x, y) => state.units.find(u => u.x === x && u.y === y);
   const buildingAt = (x, y) => state.buildings.find(b => b.x === x && b.y === y);
+  let UNIT_TILE = new Map();      // perf: tile -> units, rebuilt per state
+  function rebuildIndex() {
+    UNIT_TILE = new Map();
+    for (const u of state.units) {
+      const k = u.x + "," + u.y;
+      if (!UNIT_TILE.has(k)) UNIT_TILE.set(k, []);
+      UNIT_TILE.get(k).push(u);
+    }
+  }
   const myUnits = () => state.units.filter(u => u.side === "P");
-  const uname = u => `${u.side === "P" ? "Our" : "Enemy"} ${U(u.type).code}-${u.id}`;
+  const uname = u => `${u.side === "P" ? "Our" : "Enemy"} ${(U(u.type) || UDEF).code}-${u.id}`;
   const err = e => { toast(e.message, "bad"); beep("err"); };
 
   async function refreshCmdr() {
@@ -177,7 +186,8 @@
       const GL = { "=": "═", "M": "▲", "W": "≋", "S": "⁞", "F": "♣", "B": "≡", "U": "▦", "R": "╬",
                    "~": "∴", "O": "≈" };
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        const c = TERRAIN[y][x], [c1, c2] = P.tiles[c];
+        if (!TERRAIN[y]) continue;
+        const c = TERRAIN[y][x], [c1, c2] = P.tiles[c] || P.tiles["."];
         g.fillStyle = (x + y) % 2 ? c1 : c2; g.fillRect(px(x), py(y), TILE, TILE);
         if (GL[c]) { g.fillStyle = P.glyph[c]; g.font = "13px system-ui"; g.fillText(GL[c], px(x) + TILE / 2, py(y) + TILE / 2); }
         const k = key(x, y);
@@ -195,7 +205,7 @@
   }
   function drawBuildings(P) {
     const GL = { HQ: "★", factory: "⚙", city: "⌂", barracks: "⛺", fort: "✚",
-                 radar: "◉", training: "▲", airbase: "✈", harbor: "⚓",
+                 radar: "◉", airbase: "✈", airfield: "✈", harbor: "⚓", port: "⚓",
                  shipyard: "⚒", battery: "☗" };
     for (const b of state.buildings) {
       const x = px(b.x), y = py(b.y);
@@ -209,6 +219,11 @@
       if (b.level > 1) { g.font = "bold 9px system-ui"; g.fillText("L" + b.level, x + TILE - 9, y + 8); }
       if (b.cap) { g.font = "bold 9px system-ui"; g.fillStyle = "#ffb454";
         g.fillText(`${b.cap.pts}/${b.cap.side === "P" ? (b.type === "HQ" ? 3 : 2) : "?"}`, x + 6, y + TILE - 7); }
+      if (state.queue) {
+        const q = state.queue.find(o => o.x === b.x && o.y === b.y);
+        if (q) { g.font = "bold 10px system-ui"; g.fillStyle = "#ffb454";
+                 g.fillText("⚙" + q.left, x + 5, y + 10); }
+      }
       if (b.hp !== undefined) {
         g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(x + 6, y + TILE - 8, TILE - 12, 4);
         g.fillStyle = b.hp / b.max_hp > 0.4 ? "#ffb454" : "#ff5d5d";
@@ -240,7 +255,8 @@
       const k = u.x + "," + u.y;
       const n = stacks[k] = (stacks[k] || 0) + 1;
       const off = n > 1 ? 7 : 0;
-      const [gx, gy] = unitPos(u), x = LAB + gx * TILE + off, y = LAB + gy * TILE - off, t = U(u.type);
+      const [gx, gy] = unitPos(u), x = LAB + gx * TILE + off, y = LAB + gy * TILE - off,
+            t = U(u.type) || UDEF;
       const col = P[u.side];
       const spent = u.side === "P" && (u.acted || (u.moved && !t.move_fire));
       g.globalAlpha = spent ? 0.5 : 1;
@@ -270,7 +286,9 @@
       if (!tile) continue;
       const u = unitAt(tile.x, tile.y);
       const bb = u ? null : buildingAt(tile.x, tile.y);
-      const a = sel.attacks.get((u || bb).id);
+      const tgt = u || bb;
+      if (!tgt) continue;
+      const a = sel.attacks.get(tgt.id);
       if (!a) continue;
       const txt = `-${a.dmg}${a.counter ? "  ↩" + a.counter : ""}${a.kill ? "  KILL" : ""}`;
       g.font = "bold 12px system-ui"; const w = g.measureText(txt).width + 12;
@@ -303,7 +321,15 @@
       g.strokeRect(px(flash.x) - 2, py(flash.y) - 2, TILE + 4, TILE + 4);
     }
   }
-  (function loop() { if (state && TERRAIN.length) drawScene(screenCtx, true); requestAnimationFrame(loop); })();
+  let dirty = true;
+  function markDirty() { dirty = true; }
+  (function loop() {
+    if (state && TERRAIN.length && (dirty || anim || floats.length || hover)) {
+      dirty = false;                       // clear first: a throw can never wedge the loop
+      try { drawScene(screenCtx, true); } catch (e) { /* one bad frame must not freeze the board */ }
+    }
+    requestAnimationFrame(loop);
+  })();
 
   function pop(x, y, text, color) { floats.push({ x, y, text, color, born: performance.now() }); }
 
@@ -320,7 +346,7 @@
     $("forces").textContent = myUnits().length;
     $("cap").textContent = state.unit_cap;
     $("lvl-badge").textContent = (state.level === "pvp" ? "PvP" : state.level) + " · T" + (state.tier || 2);
-    const ready = myUnits().filter(u => !u.acted && !(u.moved && !U(u.type).move_fire)).length;
+    const ready = myUnits().filter(u => !u.acted && !(u.moved && !(U(u.type) || UDEF).move_fire)).length;
     $("ready-stat").textContent = `${ready} / ${myUnits().length - ready}`;
     $("ready-wrap").style.display = settings.readycounter ? "" : "none";
     $("zoombar").classList.toggle("hidden", !settings.zoombar);
@@ -346,26 +372,27 @@
 
   // ---------------------------------------------------------------- state loading
   function loadState(s) {
-    if (s.ter && s.ter.length) {                      // live terrain (rails, bridges, roads)
-      let diff = TERRAIN.length !== s.ter.length;
-      if (!diff) for (let i = 0; i < s.ter.length; i++) if (TERRAIN[i] !== s.ter[i]) { diff = true; break; }
-      if (diff) TERRAIN = s.ter;
-    } else if (s.map !== undefined && META.maps && META.maps[s.map]) {
-      const t = META.maps[s.map].terrain;
-      if (TERRAIN !== t) TERRAIN = t;
-    }
-    if (s.tier && s.tier !== manualTier) buildManual();
     if (s.w && s.h && (s.w !== W || s.h !== H)) {       // board size is per-game (tier 4+)
       W = s.w; H = s.h;
       canvas.width = LAB + W * TILE; canvas.height = LAB + H * TILE;
       view.s = 1;
     }
+    if (s.ter && s.ter.length === H && s.ter[0].length === W) {   // live terrain
+      let diff = TERRAIN.length !== s.ter.length;
+      if (!diff) for (let i = 0; i < s.ter.length; i++) if (TERRAIN[i] !== s.ter[i]) { diff = true; break; }
+      if (diff) TERRAIN = s.ter;
+    } else if (s.map !== undefined && META.maps && META.maps[s.map]) {
+      const m = META.maps[s.map];
+      if (m.terrain.length === H && TERRAIN !== m.terrain) TERRAIN = m.terrain;
+    }
+    if (s.tier && s.tier !== manualTier) buildManual();
     applyZoom();
     state = s; visible = new Set(s.visible); seen = new Set(s.seen);
     if (sel) { const u = findUnit(sel.unit.id); if (u) sel.unit = u; else sel = null; }
+    if (selB) { const b = buildingAt(selB.x, selB.y); if (b) selB = b; }   // capture/upgrade refresh
     const prevCredits = state ? state.credits : 0;
     const wasMyTurn = state ? state.your_turn !== false : false;
-    updateTop(); updateInfo(); renderLog(); renderLedger(); watchOpponent();
+    updateTop(); updateInfo(); renderLog(); renderLedger(); watchOpponent(); rebuildIndex(); markDirty();
     if (!s.over) {
       let phase = s.turn_label || (s.your_turn ? "Your move" : "Opponent's move");
       if (s.level === "pvp" && s.your_turn === false && s.opp_online === false)
@@ -414,22 +441,34 @@
         <div><span>ATK soft</span><b>${satk(t.atk.soft)}</b></div>
         <div><span>ATK armor</span><b>${satk(t.atk.armor)}</b></div>
         <div><span>ATK hard</span><b>${satk(t.atk.hard)}</b></div>
-        <div><span>ATK air</span><b>${satk(t.atk.air)}</b></div>
+        <div><span>ATK rotary</span><b>${satk(t.atk.rot)}</b></div>
+        <div><span>ATK fixed</span><b>${satk(t.atk.fix)}</b></div>
         <div><span>ATK sea</span><b>${satk(t.atk.sea || 0)}</b></div>
+        <div><span>ATK bld</span><b>${satk(t.atk.bld || 0)}</b></div>
         <div><span>COST</span><b>${t.cost}</b></div>
       </div>
+      ${(state.tier || 2) >= 4 && META.upkeep ? `<div class="sub">Upkeep ${META.upkeep[t.cls] || 2} cr/turn.</div>` : ""}
       <div class="sub">${t.cls === "air" ? "Flies over all terrain." : `Move ${t.move} on plains · ${road} tiles along roads · ${t.cls === "foot" ? "can cross mountains" : "cannot cross mountains"}.`}
       ${t.indirect ? ` Indirect fire: ${t.move_fire ? "can move and fire; " : "cannot move and fire; "}never counters.` : ""}
       ATK values shown are scaled by current HP (full values in the Manual).</div>
       <div class="sub" style="margin-top:6px">${t.desc}</div>`;
     if (!mine && sel) {
       const a = sel.attacks.get(u.id);
-      if (a) html += `<div class="forecast">Your ${U(sel.unit.type).code} would deal <b>${a.dmg}</b> damage${a.kill ? " — <b>destroys it</b>" : ""}${a.counter ? `, taking <b>${a.counter}</b> back` : ", no counter"}.</div>`;
+      if (a) html += `<div class="forecast">Your ${(U(sel.unit.type) || UDEF).code} would deal <b>${a.dmg}</b> damage${a.kill ? " — <b>destroys it</b>" : ""}${a.counter ? `, taking <b>${a.counter}</b> back` : ", no counter"}.</div>`;
     }
     setInfo(html);
     if (mine && !busy && !state.over && state.your_turn !== false) {
       if (!u.acted) addBtn("Wait <kbd>W</kbd>", () => doWait(u.id), "");
-      if (t.capture && !u.acted && !buildingAt(u.x, u.y) && [".", "="].includes(TERRAIN[u.y][u.x])) {
+      if (sel && sel.unit.id === u.id && sel.attacks.size) {
+        for (const [tid, a] of sel.attacks) {
+          const t2 = findUnit(tid);
+          const b2 = t2 ? null : state.buildings.find(b3 => b3.id === tid);
+          const tn = t2 ? `${t2.side === "P" ? "Our" : "Enemy"} ${(U(t2.type) || UDEF).code}-${t2.id}`
+                      : `the ${b2 ? b2.type : "target"}`;
+          addBtn(`⚔ Fire at ${tn} (-${a.dmg}${a.kill ? " KILL" : ""})`, () => doAttack(tid), "primary");
+        }
+      }
+      if (u.type === "eng" && !u.acted && !buildingAt(u.x, u.y) && [".", "="].includes(TERRAIN[u.y][u.x])) {
         addBtn(`Found factory ${META.found_cost} <kbd>F</kbd>`, () => doFound(u.id), "good", state.credits < META.found_cost);
       }
       if ((state.tier || 2) >= 3 && !u.acted) {
@@ -441,15 +480,22 @@
           if ([".", "="].includes(terr) && !buildingAt(u.x, u.y))
             addBtn("⚒ Rail 200", () => doConstruct(u.id, "rail"), "", state.credits < 200,
               state.credits < 200 ? "Insufficient funds" : "");
-          if (!buildingAt(u.x, u.y))
-            addBtn("⚒ Fort 300", () => doConstruct(u.id, "fort"), "good", state.credits < 300,
+          if (!buildingAt(u.x, u.y)) {
+            addBtn("⚒ Fort 300", () => doConstruct(u.id, "fort"), "", state.credits < 300,
               state.credits < 300 ? "Insufficient funds" : "");
+            addBtn("⚒ Airfield 1500", () => doConstruct(u.id, "airfield"), "good", state.credits < 1500,
+              state.credits < 1500 ? "Insufficient funds" : "");
+            addBtn("☗ Battery 800", () => doConstruct(u.id, "battery"), "", state.credits < 800,
+              state.credits < 800 ? "Insufficient funds" : "");
+            addBtn("⚓ Port 1200", () => doConstruct(u.id, "port"), "good", state.credits < 1200,
+              state.credits < 1200 ? "Insufficient funds" : "");
+          }
         }
         if (u.type === "ls") {
           const cap = 2, have = u.cargo || 0;
-          const pax = unitAt(u.x, u.y);
-          if (have < cap && pax && pax.side === "P" && ["foot", "tread"].includes(U(pax.type).cls))
-            addBtn(`⚓ Load ${U(pax.type).code} (${have}/${cap})`, () => doLoad(u.id), "primary");
+          const pax = adjacentLoadable(u);
+          if (have < cap && pax)
+            addBtn(`⚓ Load ${(U(pax.type) || UDEF).code} (${have}/${cap})`, () => doLoad(u.id), "primary");
           if (have > 0) {
             for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
               const bx = u.x + dx, by = u.y + dy;
@@ -458,10 +504,17 @@
             }
           }
         }
-        if (u.type === "th" && !u.cargo) {
+        if ((u.type === "th" || u.type === "ls") && u.manifest && u.manifest.length) {
+        const rows = u.manifest.map(c => {
+          const cu = U(c.type) || UDEF;
+          return `<div class="dossier-bar"><span>${cu.code}</span><span class="dbar"><i style="width:${Math.round(100 * c.hp / cu.hp)}%"></i></span><b>${c.hp}/${cu.hp}</b></div>`;
+        }).join("");
+        $("info-actions").innerHTML += `<div class="forecast" style="width:100%">⚓ Cargo manifest<br>${rows}</div>`;
+      }
+      if (u.type === "th" && !u.cargo) {
           const pax = unitAt(u.x, u.y);
           if (pax && pax.side === "P" && ["inf", "eng", "at", "mortar", "sf"].includes(pax.type))
-            addBtn(`✈ Load ${U(pax.type).code}`, () => doLoad(u.id), "primary");
+            addBtn(`✈ Load ${(U(pax.type) || UDEF).code}`, () => doLoad(u.id), "primary");
         }
         if (u.type === "th" && u.cargo) {
           for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -480,22 +533,34 @@
             }
           }
         }
+        if (u.type === "eng" && (state.tier || 2) >= 4) {
+          for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const bx = u.x + dx, by = u.y + dy;
+            if (bx >= 0 && by >= 0 && bx < W && by < H && TERRAIN[by][bx] === "B") {
+              addBtn(`💥 Demolish bridge → ${label(bx, by)}`, () => doDemoBridge(u.id, bx, by), "danger");
+              break;
+            }
+          }
+        }
       }
       if (selectable) addBtn("Cancel <kbd>Esc</kbd>", cancelSel, "");
     }
   }
   function showBuildingInfo(b) {
     const names = { HQ: "Headquarters", factory: "Factory", city: "City", barracks: "Barracks",
-                    fort: "Fortification", radar: "Radar Station", training: "Training Camp",
-                    airbase: "Airbase", harbor: "Harbor", shipyard: "Shipyard",
-                    battery: "Coastal Battery" };
-    const lvl = b.level || 1, inc = Math.floor(META.income[b.type] * (1 + 0.5 * (lvl - 1)));
+                    fort: "Fortification", radar: "Radar Station",
+                    airbase: "Airbase", airfield: "Airfield", harbor: "Harbor", port: "Port",
+                    shipyard: "Shipyard", battery: "Coastal Battery" };
+    const lvl = b.level || 1;
+    const inc = b.hp !== undefined && b.max_hp
+      ? Math.floor(META.income[b.type] * (1 + 0.5 * (lvl - 1)) * (b.hp <= b.max_hp / 2 ? 0 : b.hp / b.max_hp))
+      : Math.floor(META.income[b.type] * (1 + 0.5 * (lvl - 1)));
     const heal = META.heal[b.type] + (lvl - 1), mine = b.side === "P";
     const owner = b.side === "P" ? `<span class="tag-p">ours</span>` : b.side === "A" ? `<span class="tag-a">enemy</span>` : "neutral";
     const needT = b.type === "HQ" ? 3 : 2;
     const capTxt = b.cap ? `<div class="forecast">${b.cap.side === "P" ? "Our unit" : "Enemy unit"} is capturing this (${b.cap.pts}/${needT}).</div>` : "";
     const q = state.queue ? state.queue.filter(o => o.x === b.x && o.y === b.y) : [];
-    const qTxt = q.length ? `<div class="sub">⚙ Producing ${U(q[0].utype).code} — ${q[0].left} turn(s) left.</div>` : "";
+    const qTxt = q.length ? `<div class="sub">⚙ Producing ${(U(q[0].utype) || UDEF).code} — ${q[0].left} turn(s) left.</div>` : "";
     const upTxt = b.upgrading ? `<div class="sub">⚙ Upgrading — ${b.upgrading} turn(s) left.</div>` : "";
     const moneyOnly = ["HQ", "city"].includes(b.type)
       ? `<div class="sub">Income building — it produces credits only and builds nothing.</div>` : "";
@@ -515,15 +580,35 @@
         <div><span>INCOME</span><b>+${inc}</b></div><div><span>LEVEL</span><b>${lvl}/${META.max_level}</b></div>
         <div><span>REPAIR</span><b>+${heal}</b></div>
         <div><span>DEFENSE</span><b>${Math.round((1 - META.b_def[b.type]) * 100)}%</b></div>
-      </div>`}
+        ${b.hp !== undefined ? `<div><span>HP</span><b>${b.hp}/${b.max_hp}</b></div>
+        <div><span>DMG TAKEN</span><b>${Math.round((1 - b.hp / b.max_hp) * 100)}%</b></div>` : ""}
+      </div>
+      ${b.hp !== undefined && b.hp < b.max_hp ? `<div class="sub">⚠ Income at ${Math.round(100 * b.hp / b.max_hp)}% until repaired (✚ below).</div>` : ""}`}
       <div class="sub">${b.type === "factory" ? "Upkeep −40 cr/turn. " : ""}Units standing here at the start of their turn repair <b>${heal} HP</b> (costs ${Math.round(META.repair_rate * 100)}% of the HP's value in credits).
       ${b.type === "city" ? "Aircraft cannot repair in cities — use an HQ or factory." : ""}
       Infantry and IFVs capture it by ending a move on it.</div>`);
     if (mine && !busy && !state.over && state.your_turn !== false) {
-      if (["factory", "barracks", "airbase", "shipyard", "harbor"].includes(b.type)) {
+      if (b.type === "battery") {
+        const fired = state.buildings && b.fired === state.turn;
+        const targets = state.units.filter(u => u.side === "A" && (U(u.type) || UDEF).cls === "sea"
+          && Math.abs(u.x - b.x) + Math.abs(u.y - b.y) >= 2 && Math.abs(u.x - b.x) + Math.abs(u.y - b.y) <= 4
+          && state.visible.includes(u.x + "," + u.y));
+        for (const t of targets.slice(0, 4))
+          addBtn(`☗ Fire at ${(U(t.type) || UDEF).code}-${t.id}`, () => doBatteryFire(b.x, b.y, t.id), "primary");
+        if (!targets.length && !fired) $("info-actions").innerHTML += `<span class="muted">No spotted ships in range 2-4.</span>`;
+        if (fired) $("info-actions").innerHTML += `<span class="muted">☗ Fired this turn.</span>`;
+      }
+      if (b.type !== "HQ") addBtn("💥 Demolish", () => doDemolish(b.x, b.y), "danger");
+      if (b.hp !== undefined && b.max_hp && b.hp < b.max_hp) {
+        addBtn(`✚ Repair ${(b.max_hp - b.hp) * 5} cr`, () => doRepairBld(b.x, b.y), "good",
+          state.credits < (b.max_hp - b.hp) * 5, state.credits < (b.max_hp - b.hp) * 5 ? "Insufficient funds" : "");
+      }
+      if (["factory", "barracks", "airbase", "airfield", "shipyard", "harbor"].includes(b.type)) {
         const occupied = unitAt(b.x, b.y);
         const full = myUnits().length >= state.unit_cap;
-        if (occupied) $("info-actions").innerHTML += `<span class="muted">Tile occupied — move the unit out to build.</span>`;
+        const producing = state.queue && state.queue.some(o => o.x === b.x && o.y === b.y);
+        if (producing) $("info-actions").innerHTML += `<span class="muted">⏳ Production underway — the next order must wait.</span>`;
+        else if (occupied) $("info-actions").innerHTML += `<span class="muted">Tile occupied — move the unit out to build.</span>`;
         else tierUnits().filter(k => (U(k).sites || []).includes(b.type)
             && (U(k).tech || 1) <= (b.level || 1))
           .forEach((k, i) => addBtn(`<b>${i + 1}</b> ${U(k).code} · ${U(k).cost}`,
@@ -589,69 +674,62 @@
   function buildManual() {
     const tier = (state && state.tier) || 2;
     manualTier = tier;
-    const tu = tierUnits();
-    const udbRows = tu.map(k => {
-      const t = U(k);
-      const built = `${(t.sites || []).join("/")}${(t.tech || 1) > 1 ? " L" + t.tech : ""}`;
-      const turns = (META.build_times && META.build_times[k]) || 1;
-      return `<tr data-k="${t.code} ${t.full} ${t.cat} ${t.cls} ${t.name}"><td><b>${t.code}</b> ${t.full}</td>` +
-        `<td>${clsPill(t.cls)}</td><td class="n">${t.hp}</td><td class="n">${t.move}</td><td class="n">${t.cost}</td>` +
-        `<td class="n">${t.rng[0] === t.rng[1] ? t.rng[0] : t.rng.join("–")}</td><td class="n">${t.vis}</td>` +
-        `<td class="n">${t.atk.soft || "—"}</td><td class="n">${t.atk.armor || "—"}</td><td class="n">${t.atk.hard || "—"}</td>` +
-        `<td class="n">${t.atk.air || "—"}</td><td class="n">${t.atk.sea || "—"}</td>` +
-        `<td><small>${built}</small></td><td class="n">${turns}</td></tr>`;
-    }).join("");
-    const attackRows = tierUnits().map(k => {
-      const t = U(k);
-      const built = `${(t.sites || []).join("/")}${(t.tech || 1) > 1 ? " L" + t.tech : ""}`;
-      const turns = (META.build_times && META.build_times[k]) || 1;
-      return `<tr><td><b>${t.code}</b><br><small class="muted">${built} · ${turns}t</small></td>
-        <td class="n">${t.atk.soft || "—"}</td><td class="n">${t.atk.armor || "—"}</td>
-        <td class="n">${t.atk.hard || "—"}</td><td class="n">${t.atk.air || "—"}</td><td class="n">${t.atk.sea || "—"}</td></tr>`;
-    }).join("");
     const tierInfo = { 1: "Skirmish", 2: "Combined Arms", 3: "Engineers",
                        4: "Doctrine", 5: "Sky", 6: "Sea" };
     const sysNotes = [
-      "Captures are instant.",
-      "Captures are instant.",
-      "Captures take 2 consecutive actions (HQ 3). Engineers build roads, railways, fortifications; bridgelayers build bridges. Barracks produce infantry/support; fortifications defend.",
-      "Two-step captures. Radar stations sweep radius 6. Training camps start recruits strong. Pick a doctrine before battle.",
-      "Aircraft carry fuel and refuel at airfields/HQs; aircraft are built only at airfields. Transport helis carry one infantry squad.",
-      "Ships keep to water; submarines hide until sonar (destroyer, 4) or close spotting (2). Warships bombard the shore; landing ships assault beaches with two ground units.",
+      "Capture cities for income; kill everything or take their HQ. Forests and mountains reduce damage taken; rivers block ground units.",
+      "Combined arms: every unit counters another (see the ▲/▽ chips in the Units tab). Repair on friendly buildings; upgrade them for more income and healing.",
+      "Captures take 2 consecutive actions (HQ 3). Engineers build roads (0.5 move/tile), railways (0.25 for vehicles), fortifications and airfields. Bridgelayers bridge rivers. Barracks train infantry and support.",
+      "Two-step captures. Radar stations sweep a detection circle (grows when upgraded). Training camps start recruits strong. Pick a doctrine before battle.",
+      "Aircraft carry fuel (helis 70, strike jets 95, bombers 110, plus map bonus) and refuel at airfields or HQs. Airfields are built by engineers in 2 turns; strike jets need a level-2 one. Transport helis lift infantry.",
+      "Ships keep to open water (bridges passable beneath). Submarines hide until sonar (destroyer) or close spotting finds them. Ships bombard the shore; landing ships embark/disembark at harbors, shipyards and beaches (infantry anywhere). Warships are tough; coastal batteries guard the shore.",
     ][tier - 1];
     const hiddenTerr = tier === 1 ? new Set(["=", "S"]) : new Set();
     const terr = Object.entries(META.terrain).filter(([c]) => !hiddenTerr.has(c)).map(([c, T]) =>
       `<tr><td><b>${T.name}</b></td><td class="n">${Math.round((1 - T.def) * 100)}%</td><td class="n">${T.foot > 90 ? "—" : T.foot}</td>
        <td class="n">${T.tread > 90 ? "—" : T.tread}</td><td class="n">${T.air}</td><td>${T.desc}</td></tr>`).join("");
+    const B = {
+      HQ: "Headquarters — your crown jewel: +300 cr/turn, heals 4, strong defense, 60 HP. Lose it and the war is over (3 capture actions at tier 3+).",
+      factory: "Factory — builds vehicles and guns (tanks, artillery, AA). Upkeep −40 cr/turn, heals 3, 40 HP. Can be repaired — or destroyed.",
+      city: "City — pure income (+200 cr/turn, heals 2), 40 HP. Captures in 2 actions at tier 3+.",
+      barracks: "Barracks — trains infantry and support teams. +80 cr/turn, heals 2, 30 HP.",
+      airfield: "Airfield — engineer-built in 2 turns (1500). Builds and refuels drones and helicopters; upgrade to level 2/3 for strike jets and bombers.",
+      airbase: "Airbase — a full military field: builds and refuels all aircraft (level 2: fighters, 3: bombers). Money-neutral.",
+      shipyard: "Shipyard — builds warships (cruisers and submarines need level 2). Ships berth in the sea beside it. 40 HP.",
+      harbor: "Harbor — docks and heals ships, builds corvettes/frigates, earns +200 cr/ton trade. 40 HP.",
+      port: "Port — engineer-built on a coast (1200): a harbor you place yourself for embarkation and trade.",
+      fort: "Fortification — engineer-built (300). No income; −40% damage taken standing on it. 20 HP; can be shelled.",
+      radar: "Radar — sweeps a detection circle (6, 8, 10 by level). Never heals. 25 HP.",
+      battery: "Coastal battery — engineer-built (800, tier 6). 20 HP; auto-fires at the strongest spotted enemy ship in range 2–4 (8 damage) each of your turns.",
+      road: "Road — ground pays 0.5 movement per tile.",
+      rail: "Railway — treads pay 0.25, foot 0.5 per tile.",
+      bridge: "Bridge — the only river crossing for ground; ships pass beneath.",
+      village: "Village — terrain, not a building: −25% damage taken; infantry moves freely, vehicles slow.",
+    };
+    const structKeys = ["HQ", "factory", "city", "barracks", "airfield", "airbase", "shipyard",
+                        "harbor", "port", "fort", "radar", "battery", "road", "rail", "bridge", "village"]
+      .filter(k => (B[k] && (tier >= 2 || ["HQ", "factory", "city"].includes(k))));
+    const structRows = structKeys.map(k =>
+      `<tr data-k="${k}"><td><b>${k}</b></td><td>${B[k]}</td></tr>`).join("");
     $("manual").innerHTML = `
       <h3>Tier ${tier} — ${tierInfo[tier] || ""}</h3>
       <p>${sysNotes}</p>
-      <h3>Unit database</h3>
-      <input id="udb-search" class="chat-in" placeholder="🔍 search units — name, code, class, category…" style="margin-bottom:8px">
-      <div class="scroll-x"><table class="tbl" id="udb"><tr><th>Unit</th><th>Class</th><th class="n">HP</th>
-        <th class="n">Move</th><th class="n">Cost</th><th class="n">Rng</th><th class="n">Vis</th>
-        <th class="n">Sft</th><th class="n">Arm</th><th class="n">Hrd</th><th class="n">Air</th><th class="n">Sea</th>
-        <th>Built at</th><th class="n">Turns</th></tr>${udbRows}</table></div>
-      <h3>Attack values by target class</h3>
-      <p><b>FOOT</b> units walk (and climb mountains). <b>TREAD</b> vehicles can't enter mountains. <b>AIR</b> and <b>SEA</b> ignore terrain.
-      ATK values are base damage per target class at full HP: <b>soft</b> (infantry teams), <b>armor</b> (IFV, AFV, MBT, HT), <b>hard</b> (vehicles, guns, ships), <b>air</b> (aircraft), <b>sea</b> (warships). Damage scales with attacker HP and terrain. Every unit damages a Fighter for at least 1.</p>
-      <h3>Attack values by target class</h3>
-      <p>Base damage at full HP. All units deal at least 1 damage to Fighters.</p>
-      <div class="scroll-x"><table class="tbl"><tr><th>Attacker</th><th class="n">Soft · INF</th><th class="n">Armor · IFV/AFV/MBT</th>
-      <th class="n">Hard · MRL/SAM</th><th class="n">Air · HEL/FTR</th><th class="n">Sea · ships</th></tr>${attackRows}</table></div>
+      <h3>Structures & terrain reference</h3>
+      <input id="st-search" class="chat-in" placeholder="🔍 search structures…" style="margin-bottom:8px">
+      <div class="scroll-x"><table class="tbl" id="stb">${structRows}</table></div>
       <h3>Terrain</h3>
-      <p>Numbers are movement points spent per tile. Roads cost only 0.5 for ground units.</p>
       <div class="scroll-x"><table class="tbl"><tr><th>Tile</th><th class="n">Def</th><th class="n">Foot</th><th class="n">Tread</th><th class="n">Air</th><th>Notes</th></tr>${terr}</table></div>
-      <h3>Economy &amp; repair</h3>
-      <p>Income per turn: HQ ${META.income.HQ}, factory ${META.income.factory}, city ${META.income.city} (+50% per building level). Founding a new factory costs <b>${META.found_cost}</b>; upgrades cost ${META.upgrade_base} × level.
-      Units on a friendly city/factory/HQ repair at the start of your turn (+${META.heal.city}/+${META.heal.factory}/+${META.heal.HQ} HP, +1 per building level above 1) for credits. Aircraft can't repair in cities.
-      Direct-fire defenders counter for ${Math.round(META.counter * 100)}% damage. Fog of war hides what your units and buildings can't see; moving into an unseen enemy triggers an ambush and halts you.
-1000 Iron Marshal.</p>`;
-    const udbS = $("udb-search");
-    if (udbS) udbS.addEventListener("input", () => {
-      const q = udbS.value.trim().toLowerCase();
-      document.querySelectorAll("#udb tr[data-k]").forEach(tr => {
-        tr.style.display = !q || tr.dataset.k.toLowerCase().includes(q) ? "" : "none";
+      <h3>Unit database</h3>
+      <p class="muted">Open the <b>Units</b> tab (<kbd>U</kbd>) — every unit of this tier has its own dossier:
+      stats with bars, all five attack values, ▲/▽ matchup chips, production site, tech level and build time.</p>
+      <h3>Economy & repair</h3>
+      <p>Rank bands: 0–49 Cadet, then a new rank every 50 points up to Field Marshal at 950–999; 1000 is Iron Marshal.
+      Damaged buildings can be repaired from their panel (5 cr per HP). Destroyed buildings are gone.</p>`;
+    const stS = $("st-search");
+    if (stS) stS.addEventListener("input", () => {
+      const q = stS.value.trim().toLowerCase();
+      document.querySelectorAll("#stb tr[data-k]").forEach(tr => {
+        tr.style.display = !q || tr.dataset.k.toLowerCase().includes(q) || tr.textContent.toLowerCase().includes(q) ? "" : "none";
       });
     });
   }
@@ -676,7 +754,9 @@
       if (mv) anim = { id, fx: from.x, fy: from.y, tx: mv.to[0], ty: mv.to[1], start: performance.now(), dur: speed(300) || 1 };
       loadState(j.state); await showEvents(j.events); beep("move");
       const u = findUnit(id);
-      if (u && !u.acted && !state.over) await selectUnit(u);
+      const spent = !u || u.acted || (u.moved && !(U(u.type) || UDEF).move_fire);
+      if (u && !state.over && !spent) await selectUnit(u);   // stays selected until fully spent
+      else { sel = null; updateInfo(); }
       setTimeout(() => { if (anim && anim.id === id) anim = null; }, 320);
     } catch (e) { err(e); updateInfo(); }
   }
@@ -687,9 +767,32 @@
     catch (e) { err(e); updateInfo(); }
   }
   async function doWait(id) { sel = null; try { loadState((await api("/api/wait", { unit: id })).state); } catch (e) { err(e); } }
-  async function doBuild(x, y, type) { try { const j = await api("/api/build", { x, y, type }); loadState(j.state); beep("build"); selB = buildingAt(x, y); updateInfo(); } catch (e) { err(e); } }
+  async function doBuild(x, y, type) {
+    try {
+      const j = await api("/api/build", { x, y, type });
+      const turns = (META.build_times && META.build_times[type]) || 1;
+      loadState(j.state); beep("build");
+      selB = buildingAt(x, y); updateInfo();
+      if (turns > 1) toast(`⚙ ${U(type).code} ordered — ready in ${turns} turns.`, "good");
+    } catch (e) { err(e); }
+  }
   async function doUpgrade(x, y) { try { const j = await api("/api/upgrade", { x, y }); loadState(j.state); selB = buildingAt(x, y); updateInfo(); } catch (e) { err(e); } }
   async function doFound(id) { try { const j = await api("/api/found", { unit: id }); sel = null; loadState(j.state); } catch (e) { err(e); } }
+  function adjacentLoadable(ship) {
+    for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const tx = ship.x + dx, ty = ship.y + dy;
+      if (tx < 0 || ty < 0 || tx >= W || ty >= H) continue;
+      const b = buildingAt(tx, ty);
+      const terr = TERRAIN[ty][tx];
+      for (const q of unitsAt(tx, ty)) {
+        if (q.side !== "P" || q.id === ship.id) continue;
+        if (!["foot", "tread"].includes((U(q.type) || UDEF).cls)) continue;
+        if ((b && ["harbor", "shipyard"].includes(b.type)) || terr === "~") return q;
+        if ((U(q.type) || UDEF).cls === "foot" && [".", "="].includes(terr)) return q;
+      }
+    }
+    return null;
+  }
   async function doLoad(id) {
     sel = null;
     try { loadState((await api("/api/load", { unit: id })).state); beep("move"); }
@@ -698,6 +801,26 @@
   async function doUnload(id, x, y) {
     sel = null;
     try { loadState((await api("/api/unload", { unit: id, x, y })).state); beep("move"); }
+    catch (e) { err(e); }
+  }
+  async function doDemoBridge(id, x, y) {
+    try { const j = await api("/api/demolish_bridge", { unit: id, x, y }); sel = null; loadState(j.state); toast("Bridge demolished.", "good"); }
+    catch (e) { err(e); }
+  }
+  function doDemolish(x, y) {
+    confirmDialog("Demolish this building?", "It is gone for good - no refund. (Esc to cancel)", [
+      { label: "Demolish", hot: "d", cls: "danger", fn: async () => {
+        try { const j = await api("/api/demolish", { x, y }); selB = null; loadState(j.state); toast("Building demolished.", "good"); }
+        catch (e) { err(e); } } },
+      { label: "Keep it", hot: "k", fn: () => {} },
+    ]);
+  }
+  async function doBatteryFire(x, y, target) {
+    try { const j = await api("/api/battery_fire", { x, y, target }); loadState(j.state); await showEvents(j.events); beep("hit"); updateInfo(); }
+    catch (e) { err(e); }
+  }
+  async function doRepairBld(x, y) {
+    try { const j = await api("/api/repair_bld", { x, y }); loadState(j.state); beep("heal"); selB = buildingAt(x, y); updateInfo(); }
     catch (e) { err(e); }
   }
   async function doConstruct(id, kind, x, y) {
@@ -715,6 +838,7 @@
       else if (e.t === "ambush") { pop(e.x, e.y, "AMBUSH!", "#ff6b6b"); beep("contact"); }
       else if (e.t === "capprog") { pop(e.x, e.y, `CAP ${e.pts}/${e.need}`, e.side === "P" ? "#4dff9d" : "#ff6b6b"); beep("capture"); }
       else if (e.t === "bldhit") { pop(e.x, e.y, e.dk ? "DESTROYED" : "-" + e.dmg, e.dk ? "#ff6b6b" : "#ffb454"); beep(e.dk ? "kill" : "hit"); }
+      else if (e.t === "blocked") { pop(e.x, e.y, "ROUTE BLOCKED", "#ff6b6b"); beep("contact"); }
     }
   }
 
@@ -789,7 +913,7 @@
   }
 
   // ---------------------------------------------------------------- end turn & AI replay
-  function idleUnits() { return myUnits().filter(u => !u.acted && !(u.moved && !U(u.type).move_fire)).length; }
+  function idleUnits() { return myUnits().filter(u => !u.acted && !(u.moved && !(U(u.type) || UDEF).move_fire)).length; }
   function requestEndTurn() {
     if (busy || !state || state.over || state.your_turn === false) return;
     const idle = idleUnits();
@@ -815,7 +939,7 @@
     pushLog(e);
     if (e.t === "move") {
       let u = findUnit(e.u.id);
-      if (!u) { u = Object.assign({ mhp: U(e.u.type).hp, moved: true, acted: true }, e.u); u.x = e.from[0]; u.y = e.from[1]; state.units.push(u); }
+      if (!u) { u = Object.assign({ mhp: (U(e.u.type) || UDEF).hp, moved: true, acted: true }, e.u); u.x = e.from[0]; u.y = e.from[1]; state.units.push(u); }
       anim = { id: u.id, fx: e.from[0], fy: e.from[1], tx: e.to[0], ty: e.to[1], start: performance.now(), dur: speed(380) || 1 };
       await sleep(400); u.x = e.to[0]; u.y = e.to[1]; anim = null;
       if (!e.to_vis) state.units = state.units.filter(x => x.id !== u.id);
@@ -1089,12 +1213,78 @@
     toast("Board image saved.", "good");
   }
 
+  // ------------------------------------------------------- unit database panel
+  let udbCat = null, udbSel = null;
+  function udbCats() {
+    const out = [];
+    for (const c of META.cats) {
+      let list = tierUnits().filter(k => U(k).cat === c);
+      if (c === "Fire Support")
+        list = list.concat(tierUnits().filter(k => U(k).cat === "Infantry Support"));
+      if (c === "Infantry Support") continue;      // merged into Support
+      if (list.length) out.push([c === "Fire Support" ? "Support" : c, list]);
+    }
+    return out;
+  }
+  function renderUdb() {
+    const tabs = $("udb-tabs"), list = $("udb-list"), dos = $("udb-dossier");
+    if (!tabs || !META) return;
+    const cats = udbCats();
+    if (!udbCat || !cats.some(([c]) => c === udbCat)) udbCat = cats[0] && cats[0][0];
+    tabs.innerHTML = "";
+    for (const [c] of cats) {
+      const b = document.createElement("button");
+      b.className = "chip" + (c === udbCat ? " on" : "");
+      b.textContent = c;
+      b.addEventListener("click", () => { udbCat = c; udbSel = null; renderUdb(); });
+      tabs.appendChild(b);
+    }
+    const cur = cats.find(([c]) => c === udbCat);
+    list.innerHTML = "";
+    for (const k of cur[1]) {
+      const t = U(k);
+      const b = document.createElement("button");
+      b.className = "wcard" + (k === udbSel ? " sel" : "");
+      b.innerHTML = `<b>${t.code}</b><br><small>${t.name}</small>`;
+      b.title = t.full;
+      b.addEventListener("click", () => { udbSel = k; renderUdb(); });
+      list.appendChild(b);
+    }
+    dos.innerHTML = udbSel ? dossier(udbSel) : `<span class="muted">Pick a ${udbCat} unit.</span>`;
+  }
+  function dossier(k) {
+    const t = U(k), tu = tierUnits();
+    const mx = { hp: 0, move: 0, cost: 0, vis: 0 };
+    tu.forEach(q => { const u = U(q); mx.hp = Math.max(mx.hp, u.hp); mx.move = Math.max(mx.move, u.move);
+                      mx.cost = Math.max(mx.cost, u.cost); mx.vis = Math.max(mx.vis, u.vis); });
+    const row = (label, v, m) => `<div class="dossier-bar"><span>${label}</span>` +
+      `<span class="dbar"><i style="width:${Math.round(100 * v / (m || 1))}%"></i></span><b>${v}</b></div>`;
+    const atk = [["soft", "Soft"], ["armor", "Armor"], ["hard", "Hard"], ["rot", "Rotary"], ["fix", "Fixed"], ["sea", "Sea"], ["bld", "Bld"]]
+      .map(([c, n]) => `<div class="atkbox"><span>${n}</span><b>${t.atk[c] || "—"}</b></div>`).join("");
+    const strong = Object.entries(t.atk).filter(([, v]) => v >= 7).map(([c]) => c);
+    const weak = Object.entries(t.atk).filter(([, v]) => v > 0 && v <= 2).map(([c]) => c);
+    const chips = (strong.length ? `<span class="chip on">▲ strong: ${strong.join(", ")}</span> ` : "") +
+                  (weak.length ? `<span class="chip">▽ weak: ${weak.join(", ")}</span>` : "");
+    const built = (t.sites || []).join(" / ") + ((t.tech || 1) > 1 ? ` — needs level ${t.tech}` : "");
+    const turns = (META.build_times && META.build_times[k]) || 1;
+    return `<div><span class="title">${t.code} — ${t.full}</span> ${clsPill(t.cls)}
+      <span class="chip on">target: ${(META.target_class && META.target_class[k]) || "-"}</span></div>
+      <div class="sub" style="margin:4px 0 8px">${t.cat} · ${t.desc}</div>
+      ${row("HP", t.hp, mx.hp)}${row("Move", t.move, mx.move)}${row("Cost", t.cost, mx.cost)}${row("Vision", t.vis, mx.vis)}
+      <div class="dossier-bar"><span>Range</span><b style="flex:1;text-align:left">${t.rng[0] === t.rng[1] ? t.rng[0] : t.rng.join("–")}</b></div>
+      <div class="atkrow">${atk}</div>
+      <div style="margin:6px 0">${chips}</div>
+      <div class="sub">⚙ Built at <b>${built}</b> · build time <b>${turns} turn(s)</b>
+      ${t.indirect ? " · indirect fire (never counters)" : ""}${t.capture ? " · can capture" : ""}</div>`;
+  }
+
   // ---------------------------------------------------------------- tabs
   function showTab(name) {
     document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
     document.querySelectorAll(".tabpane").forEach(p => p.classList.toggle("hidden", p.id !== "tab-" + name));
     if (name === "records") refreshHof();
     if (name === "chat") renderChat();
+    if (name === "units") renderUdb();
   }
   document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
@@ -1105,8 +1295,7 @@
     const x = Math.floor(((e.clientX - r.left) * sx - LAB) / TILE), y = Math.floor(((e.clientY - r.top) * sy - LAB) / TILE);
     return (x >= 0 && y >= 0 && x < W && y < H) ? { x, y } : null;
   }
-  const unitsAt = (x, y) => state.units
-    .filter(u => u.x === x && u.y === y)
+  const unitsAt = (x, y) => UNIT_TILE.get(x + "," + y) || []
     .sort((a, b) => (b.side === "P") - (a.side === "P"));   // yours first
   let lastPick = null;
   async function activate(x, y, fromKeys) {
@@ -1114,16 +1303,50 @@
     const myTurn = state.your_turn !== false;      // on the opponent's turn: inspect only
     cursor = { x, y };
     const stack = unitsAt(x, y);
-    let u = stack[0] || null;
-    if (stack.length > 1 && lastPick && lastPick.x === x && lastPick.y === y) {
+    const bHere = buildingAt(x, y);
+    const bHere0 = bHere;
+    let u = stack[0] || null, pickB = false;
+    if (lastPick && lastPick.x === x && lastPick.y === y) {
       const i = stack.findIndex(q => q.id === lastPick.id);   // click again: next occupant
-      u = stack[(Math.max(i, 0) + 1) % stack.length];
-      sel = null;
+      if (lastPick.kind === "bld") { /* start over at first unit */ }
+      else if (i >= 0 && i + 1 < stack.length) u = stack[i + 1];
+      else if (bHere) { u = null; pickB = true; }
     }
-    lastPick = u ? { x, y, id: u.id } : null;
+    lastPick = pickB ? { x, y, kind: "bld" }
+                     : u ? { x, y, id: u.id, kind: "unit" } : null;
+    if (pickB && bHere) {
+      sel = null; selB = bHere; showBuildingInfo(bHere); beep("select");
+      return;
+    }
+    const canMoveThere = sel && sel.moves.has(key(x, y));
+    if (sel && myTurn && canMoveThere && (u || bHere0)) {   // real conflict: ask
+      const opts = [{ label: "Move here", hot: "m", cls: "primary", fn: () => doMove(x, y) }];
+      stack.forEach((q, i) => opts.push({
+        label: `Select ${q.side === "P" ? "Our" : "Enemy"} ${(U(q.type) || UDEF).code}-${q.id}`,
+        hot: String(i + 1),
+        fn: () => { sel = null; selB = null; q.side === "P" ? selectUnit(q) : showUnitInfo(q, false); },
+      }));
+      for (const [tid, a] of sel.attacks) {
+        const q = stack.find(x => x.id === tid);
+        const b2 = bHere0 && bHere0.id === tid ? bHere0 : null;
+        if (!q && !b2) continue;
+        const tn = q ? `${q.side === "P" ? "Our" : "Enemy"} ${(U(q.type) || UDEF).code}-${q.id}` : `the ${b2.type}`;
+        opts.splice(1, 0, { label: `⚔ Attack ${tn} (-${a.dmg})`, hot: "t", cls: "danger", fn: () => doAttack(tid) });
+        break;
+      }
+      if (bHere0) opts.push({ label: `Open ${bHere0.type} <kbd>B</kbd>`, hot: "b", fn: () => {
+        sel = null; selB = bHere0; showBuildingInfo(bHere0); beep("select"); } });
+      opts.push({ label: "Cancel", hot: "esc", fn: () => {} });
+      confirmDialog(`Move to ${label(x, y)} or select what's there?`, "M = move · 1-9 = select a unit · B = building · Esc = cancel", opts);
+      return;
+    }
+    if (sel && myTurn && u && !canMoveThere) {   // not a move destination: inspect/select directly
+      if (u.side === "A" && sel.attacks.has(u.id)) return doAttack(u.id);
+      sel = null; selB = null;
+      return u.side === "P" ? selectUnit(u) : showUnitInfo(u, false);
+    }
     if (sel && myTurn) {
-      if (u && u.side === "A" && sel.attacks.has(u.id)) return doAttack(u.id);
-      const bb = u ? null : buildingAt(x, y);
+      const bb = buildingAt(x, y);
       if (bb && sel.attacks.has(bb.id)) return doAttack(bb.id);
       if (sel.moves.has(key(x, y))) return doMove(x, y);
       if (u && u.id === sel.unit.id && fromKeys && myTurn) return doWait(u.id);
@@ -1137,16 +1360,17 @@
     const b = buildingAt(x, y);
     if (b) { selB = b; showBuildingInfo(b); beep("select"); } else showTerrainInfo(x, y);
   }
+  canvas.addEventListener("contextmenu", e => { e.preventDefault(); cancelSel(); lastPick = null; });
   canvas.addEventListener("click", e => {
     if (panned) { panned = false; return; }
     canvas.focus({ preventScroll: true });
     const t = tileFromEvent(e); if (t) activate(t.x, t.y, false);
   });
-  canvas.addEventListener("mousemove", e => { hover = tileFromEvent(e); updateStatusline(); });
+  canvas.addEventListener("mousemove", e => { const h = tileFromEvent(e); if ((h && h.x) !== (hover && hover.x) || (h && h.y) !== (hover && hover.y)) markDirty(); hover = h; updateStatusline(); });
   canvas.addEventListener("mouseleave", () => { hover = null; });
 
   // ---------------------------------------------------------------- input: keyboard
-  function readyUnits() { return myUnits().filter(u => !u.acted && !(u.moved && !U(u.type).move_fire)).sort((a, b) => a.id - b.id); }
+  function readyUnits() { return myUnits().filter(u => !u.acted && !(u.moved && !(U(u.type) || UDEF).move_fire)).sort((a, b) => a.id - b.id); }
   function cycleReady(dir) {
     const list = readyUnits(); if (!list.length) { toast("No units left to act.", "bad"); return; }
     const cur = sel ? sel.unit.id : (unitAt(cursor.x, cursor.y) || {}).id;
@@ -1208,6 +1432,7 @@
       case "m": showTab("manual"); break;
       case "r": showTab("records"); break;
       case "c": showTab("chat"); break;
+      case "u": showTab("units"); break;
       case "p": exportBoard(); break;
     }
   });

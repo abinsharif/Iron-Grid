@@ -1,7 +1,6 @@
+# private / generated files
 __pycache__/
-*.py[cod]
-.env
-.venv/
-venv/
+tiers/__pycache__/
+*.pyc
 irongrid.db
-irongrid.db-*
+.DS_Store

@@ -284,3 +284,23 @@ body { font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Aria
 .btn-ig.off { opacity: .55; cursor: not-allowed; }
 .btn-ig.off:hover { background: var(--btn); }
 .wcard:disabled { opacity: .5; cursor: not-allowed; }
+
+/* unit database stat bars */
+.ubar { display: block; width: 52px; height: 4px; background: var(--line); border-radius: 2px; margin: 3px auto 0; }
+.ubar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+
+/* CoN-style unit database */
+.udb-body { display: flex; gap: 12px; align-items: flex-start; }
+#udb-list { flex: 0 0 170px; display: grid; gap: 5px; align-content: start; }
+#udb-list .wcard { padding: 6px 9px; font-size: .85rem; }
+#udb-list .wcard.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+#udb-dossier { flex: 1; min-width: 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.dossier-bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+.dossier-bar span { flex: 0 0 74px; font-size: .75rem; color: var(--muted); }
+.dbar { flex: 1; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.dbar i { display: block; height: 100%; background: var(--accent); }
+.dossier-bar b { flex: 0 0 34px; text-align: right; font-size: .85rem; }
+.atkrow { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.atkbox { flex: 1 1 60px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 7px; text-align: center; }
+.atkbox span { display: block; font-size: .66rem; color: var(--muted); }
+.atkbox b { font-size: 1.05rem; }
