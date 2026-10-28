@@ -44,7 +44,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "irongrid.db")
 LEGACY_RECORDS = os.path.join(BASE_DIR, "records.json")
 SAVE_VERSION = 4
-APP_VERSION = "4.6.6"
+APP_VERSION = "4.7.1"
 
 # ========================================================================
 # map & terrain
@@ -537,24 +537,17 @@ def check_annihilation(game):
 # turn structure & healing
 # ========================================================================
 def heal_units(game, side, events):
-    for u in game["units"]:
-        if u["side"] != side:
-            continue
+    """Localized repair: aircraft at airfields, ships beside docks, land units on land buildings."""
+    def repair(u, b, rate):
         t = UNITS[u["type"]]
-        b = building_at(game, u["x"], u["y"])
-        if not b or b["side"] != side or u["hp"] >= t["hp"]:
-            continue
-        if t["cls"] == "air" and b["type"] == "city":
-            continue                      # no airstrip in a city
+        if u["hp"] >= t["hp"] or rate <= 0:
+            return
         per = max(1, round(t["cost"] / t["hp"] * REPAIR_RATE))
-        amt = min(heal_amount(b), t["hp"] - u["hp"], game["credits"][side] // per)
+        amt = min(10, rate + (b.get("level", 1) - 1), t["hp"] - u["hp"], game["credits"][side] // per)
         if amt <= 0:
-            entries = glog(game, "repair", "bad",
-                           lambda S: f"✚ {uname(u, S)} could not be repaired at {label(u['x'], u['y'])}: not enough credits.",
-                           u["x"], u["y"], aud=side)
             if side == "P":
-                events.append({"t": "note", "log": entries.get("P", [])})
-            continue
+                events.append({"t": "note", "log": []})
+            return
         hp0 = u["hp"]
         u["hp"] += amt
         game["credits"][side] -= amt * per
@@ -566,6 +559,26 @@ def heal_units(game, side, events):
             game["stats"]["repaired"] += amt
             events.append({"t": "heal", "id": u["id"], "x": u["x"], "y": u["y"], "amt": amt,
                            "hp": u["hp"], "log": entries.get("P", [])})
+
+    docks = [b for b in game["buildings"] if b["side"] == side
+             and b["type"] in ("harbor", "shipyard", "port")]
+    for u in game["units"]:
+        if u["side"] != side or u["hp"] >= UNITS[u["type"]]["hp"]:
+            continue
+        cls = UNITS[u["type"]]["cls"]
+        if cls == "air":
+            b = building_at(game, u["x"], u["y"])
+            if b is not None and b["side"] == side and b["type"] in ("airbase", "airfield"):
+                repair(u, b, 4 if b["type"] == "airbase" else 2)
+        elif cls == "sea":
+            for b in docks:
+                if man(u["x"], u["y"], b["x"], b["y"]) == 1:
+                    repair(u, b, {"harbor": 6, "shipyard": 5, "port": 5}[b["type"]])
+                    break
+        else:
+            b = building_at(game, u["x"], u["y"])
+            if b is not None and b["side"] == side and b["type"] in ("city", "factory", "HQ", "barracks", "fort"):
+                repair(u, b, HEAL.get(b["type"], 0))
 
 
 DEFENSES = tier6.DEFENSES
@@ -623,6 +636,24 @@ def spawn_unit(game, side, utype, x, y):
 
 def process_queue(game, side, events):
     """Production orders count down at the start of the owner's turn; upgrades take time."""
+    for q in list(game["prod"]):
+        if q["side"] != side:
+            continue
+        if unit_at(game, q["x"], q["y"]) is not None:
+            continue
+        q["left"] -= 1
+        if q["left"] > 0:
+            glog(game, "build", "info",
+                 lambda S: f"⚙ Producing {UNITS[q['utype']]['code']} — {q['left']} turn(s) left.",
+                 q["x"], q["y"], aud=side)
+            continue
+        nu = spawn_unit(game, side, q["utype"], q.get("sx", q["x"]), q.get("sy", q["y"]))
+        nu["moved"] = nu["acted"] = False        # fresh from the yard: ready to act
+        game["prod"] = [o for o in game["prod"] if o is not q]
+        glog(game, "build", "good",
+             lambda S: f"⚙ {uname(nu, S)} rolled out at {label(q['x'], q['y'])}.",
+             q["x"], q["y"], aud=side)
+        events.append({"t": "built", "u": snap(nu), "log": []})
     for q in list(game.get("bldprod", [])):
         if q["side"] != side:
             continue
@@ -640,24 +671,6 @@ def process_queue(game, side, events):
         glog(game, "build", "good",
              lambda S: f"⚒ Airfield operational at {label(q['x'], q['y'])}.", q["x"], q["y"], aud=side)
         events.append({"t": "built", "x": q["x"], "y": q["y"], "log": []})
-    for q in list(game["prod"]):
-        if q["side"] != side:
-            continue
-        if unit_at(game, q["x"], q["y"]) is not None:
-            continue                                # pad occupied: hold the order
-        q["left"] -= 1
-        if q["left"] > 0:
-            glog(game, "build", "info",
-                 lambda S: f"⚙ Producing {UNITS[q['utype']]['code']} — {q['left']} turn(s) left.",
-                 q["x"], q["y"], aud=side)
-            continue
-        nu = spawn_unit(game, side, q["utype"], q.get("sx", q["x"]), q.get("sy", q["y"]))
-        nu["moved"] = nu["acted"] = False        # fresh from the yard: ready to act
-        game["prod"] = [o for o in game["prod"] if o is not q]
-        glog(game, "build", "good",
-             lambda S: f"⚙ {uname(nu, S)} rolled out at {label(q['x'], q['y'])}.",
-             q["x"], q["y"], aud=side)
-        events.append({"t": "built", "u": snap(nu), "log": []})
     for b in game["buildings"]:
         if b["side"] == side and b.get("upgrading"):
             b["upgrading"] -= 1
@@ -666,7 +679,7 @@ def process_queue(game, side, events):
                 b["level"] = b.get("level", 1) + 1
                 if b.get("max_hp"):
                     b["max_hp"] += 10                    # upgrades harden the structure
-                    b["hp"] = b["max_hp"]                # ...and bring it to full health
+                    b["hp"] = min(b["max_hp"], b["hp"] + 10)   # +10 current, never a free full repair
                 glog(game, "build", "good",
                      lambda S: f"⚙ {bname(b)} at {label(b['x'], b['y'])} reached L{b['level']}.",
                      b["x"], b["y"], aud=side)
@@ -695,7 +708,8 @@ def begin_turn(game, side, events=None):
                     u["fuel"] = fuel_for(game, u["type"])
     heal_units(game, side, events)
     if game.get("tier", 2) >= 4:
-        up = sum(UPKEEP.get(UNITS[u["type"]]["cls"], 2) for u in game["units"] if u["side"] == side)
+        up = sum(UPKEEP.get(u["type"], UPKEEP.get("_" + UNITS[u["type"]]["cls"], 2))
+                 for u in game["units"] if u["side"] == side)
         if up:
             game["credits"][side] = max(0, game["credits"][side] - up)
     else:
@@ -873,6 +887,8 @@ def public_state(game, side=None):
         win_me = res["winner"] == side
         if res["reason"] == "hq":
             reason = "Enemy HQ captured" if win_me else "Your HQ was captured"
+        elif res["reason"] == "hq_destroyed":
+            reason = "Enemy HQ destroyed" if win_me else "Your HQ was destroyed"
         else:
             reason = "Enemy forces destroyed" if win_me else "Your forces were destroyed"
         res = {"winner": "P" if win_me else "A", "reason": reason}
@@ -1386,7 +1402,6 @@ def ai_build_weights(game, cfg, ctx, a_units, cred, threatened):
          "drone": 0.9 if cnt["drone"] < 2 else 0.1,
          "ht": 1.4, "sf": 0.8, "how": 0.9 if cred > 1200 else 0.0,
          "uav": 0.8 if cnt["uav"] < 1 else 0.1, "cv": 0.6,
-         "asf": 2.0 if air >= 2 else 0.2,
          "intr": 1.2, "sb": 0.7 if cred > 2000 else 0.0, "th": 0.2,
          "aa": 2.2 if air >= 1 else 0.0, "td": 0.8,
          "cor": 0.9, "fr": 1.2, "dd": 1.2 if ek["sub"] else 0.6,
@@ -1811,11 +1826,9 @@ def api_demolish():
             return fail("bad tile")
         if b is None or b["side"] != side:
             return fail("not your building")
-        if b["type"] == "HQ":
-            return fail("you cannot demolish your own HQ")
-        if any(q for q in game["units"] if q["side"] == side and q["x"] == b["x"] and q["y"] == b["y"]):
-            return fail("move your unit off the site first")
-        game["buildings"] = [x for x in game["buildings"] if x is not b]
+        if b["type"] not in ("airfield", "port", "battery", "radar", "fort"):
+            return fail("only forward structures (airfield, port, battery, radar, fort) can be demolished")
+        game["buildings"] = [x for x in game["buildings"] if x is not b]   # the garrison keeps its footing
         glog(game, "build", "info",
              lambda S: f"💥 {'We' if side == 'P' else 'The enemy'} demolished the "
                        f"{bname(b)} at {label(b['x'], b['y'])}.",
@@ -2098,7 +2111,7 @@ def api_load():
         if e:
             return e
         u = player_unit(game, (request.get_json(force=True, silent=True) or {}).get("unit"))
-        if u is None or u["type"] not in ("th", "ls") or u["acted"]:
+        if u is None or u["type"] not in ("th", "ls"):
             return fail("that transport cannot load now")
         cap = 1 if u["type"] == "th" else 2
         cargo = u.setdefault("cargo", [])
@@ -2168,7 +2181,7 @@ def api_unload():
             au["fuel"] = fuel_for(game, utype)
         game["units"].append(au)
         game["next_uid"] += 1
-        u["moved"] = u["acted"] = True
+        u["moved"] = True          # the ship stays put, but keeps unloading its cargo
         glog(game, "move", "info",
              lambda S: f"✈ {uname(u, S)} unloaded {UNITS[c['type']]['code']} at {label(x, y)}.",
              x, y, aud=side)
@@ -2498,6 +2511,9 @@ def resolve_building_attack(game, att, bl, events):
     if destroyed:
         game["buildings"] = [b for b in game["buildings"] if b["id"] != bl["id"]]
         st["kills" if att["side"] == "P" else "losses"] += 1
+        if bl["type"] == "HQ":
+            game["result"] = {"winner": att["side"], "reason": "hq_destroyed"}
+            finalize_result(game)
         entries = {k: v + glog(game, "kill", "good" if att["side"] == "P" else "bad",
                     f"✖ {bname(bl)} destroyed at {label(bl['x'], bl['y'])}.",
                     bl["x"], bl["y"]).get(k, []) for k, v in entries.items()}

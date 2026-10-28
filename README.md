@@ -1,13 +1,20 @@
 # IRON GRID
 
-**Tiered turn-based tactics for your LAN.** One account, six complete games: pick a ruleset,
+**Current version: v4.6.6** — tiered turn-based tactics for your LAN. One account, six complete games: pick a ruleset,
 pick a battlefield, pick an enemy — from the 4-unit Skirmish to combined-arms, engineers,
 doctrines, air power, and full naval war. Server-authoritative Flask + canvas, SQLite
 persistence, LAN multiplayer with in-game chat.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Flask](https://img.shields.io/badge/flask-3.x-green)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
+## Screenshots
+
+<!-- Drop images into an `images/` folder and update these paths -->
+
+| Battlefield | Lobby |
+|---|---|
+| ![Battlefield](images/battlefield.png) | ![Lobby](images/lobby.png) |
 
 ## Why IRON GRID
 
@@ -43,9 +50,10 @@ just to build.
 - **HQs and cities are money.** Factories build armor and guns but cost 40/turn in upkeep;
   barracks train infantry at −50/turn; harbors and ports *earn* trade income (+200/+120).
 - **Buildings have HP.** Everything can be bombarded — income scales with structural
-  health, past-half buildings stop producing, overkill destroys, and you choose: repair,
-  upgrade (which also hardens and heals the structure), or **demolish** your own before the
-  enemy captures it.
+  health, past-half buildings stop producing, overkill destroys, and you choose: repair or
+  upgrade (which also hardens and heals the structure to full). Forward structures you
+  built yourself - airfields, ports, batteries, radars - and bridges can be demolished
+  to deny them to the enemy.
 - **Production takes time.** Infantry, drones and corvettes roll out in a turn; MBTs,
   fighters and destroyers take two; heavy tanks, howitzers, bombers, cruisers and
   submarines take three. Buildings upgrade in one turn, then two. One order per production
@@ -136,7 +144,11 @@ game, play a tier, and tell us what the AI did wrong.
 
 ## License
 
-MIT (add a `LICENSE` file to make it official).
+Copyright (c) 2026 a.binsharif1. All rights reserved. Public source: you may view, fork,
+and run IRON GRID for personal, non-commercial use; improvements, bug reports, and
+feature discussions via issues and pull requests are very welcome. Commercial use
+(including paid hosting) requires written permission — the author may offer commercial
+licensing in the future. See [LICENSE](LICENSE).
 
 ## Contact
 

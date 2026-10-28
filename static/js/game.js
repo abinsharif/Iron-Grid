@@ -447,7 +447,7 @@
         <div><span>ATK bld</span><b>${satk(t.atk.bld || 0)}</b></div>
         <div><span>COST</span><b>${t.cost}</b></div>
       </div>
-      ${(state.tier || 2) >= 4 && META.upkeep ? `<div class="sub">Upkeep ${META.upkeep[t.cls] || 2} cr/turn.</div>` : ""}
+      ${(state.tier || 2) >= 4 && META.upkeep ? `<div class="sub">Upkeep ${META.upkeep[u.type] !== undefined ? META.upkeep[u.type] : (META.upkeep["_" + t.cls] || 2)} cr/turn.</div>` : ""}
       <div class="sub">${t.cls === "air" ? "Flies over all terrain." : `Move ${t.move} on plains · ${road} tiles along roads · ${t.cls === "foot" ? "can cross mountains" : "cannot cross mountains"}.`}
       ${t.indirect ? ` Indirect fire: ${t.move_fire ? "can move and fire; " : "cannot move and fire; "}never counters.` : ""}
       ATK values shown are scaled by current HP (full values in the Manual).</div>
@@ -598,7 +598,8 @@
         if (!targets.length && !fired) $("info-actions").innerHTML += `<span class="muted">No spotted ships in range 2-4.</span>`;
         if (fired) $("info-actions").innerHTML += `<span class="muted">☗ Fired this turn.</span>`;
       }
-      if (b.type !== "HQ") addBtn("💥 Demolish", () => doDemolish(b.x, b.y), "danger");
+      if (["airfield", "port", "battery", "radar", "fort"].includes(b.type))
+        addBtn("💥 Demolish", () => doDemolish(b.x, b.y), "danger");
       if (b.hp !== undefined && b.max_hp && b.hp < b.max_hp) {
         addBtn(`✚ Repair ${(b.max_hp - b.hp) * 5} cr`, () => doRepairBld(b.x, b.y), "good",
           state.credits < (b.max_hp - b.hp) * 5, state.credits < (b.max_hp - b.hp) * 5 ? "Insufficient funds" : "");
@@ -720,7 +721,7 @@
       <h3>Terrain</h3>
       <div class="scroll-x"><table class="tbl"><tr><th>Tile</th><th class="n">Def</th><th class="n">Foot</th><th class="n">Tread</th><th class="n">Air</th><th>Notes</th></tr>${terr}</table></div>
       <h3>Unit database</h3>
-      <p class="muted">Open the <b>Units</b> tab (<kbd>U</kbd>) — every unit of this tier has its own dossier:
+      <p class="muted">Open the <b>Units</b> tab (<kbd>D</kbd>) — every unit of this tier has its own dossier:
       stats with bars, all five attack values, ▲/▽ matchup chips, production site, tech level and build time.</p>
       <h3>Economy & repair</h3>
       <p>Rank bands: 0–49 Cadet, then a new rank every 50 points up to Field Marshal at 950–999; 1000 is Iron Marshal.
@@ -794,14 +795,16 @@
     return null;
   }
   async function doLoad(id) {
-    sel = null;
-    try { loadState((await api("/api/load", { unit: id })).state); beep("move"); }
-    catch (e) { err(e); }
+    try {
+      loadState((await api("/api/load", { unit: id })).state); beep("move");
+      const u = findUnit(id); if (u) await selectUnit(u);   // stay aboard: more loads/unloads
+    } catch (e) { err(e); }
   }
   async function doUnload(id, x, y) {
-    sel = null;
-    try { loadState((await api("/api/unload", { unit: id, x, y })).state); beep("move"); }
-    catch (e) { err(e); }
+    try {
+      loadState((await api("/api/unload", { unit: id, x, y })).state); beep("move");
+      const u = findUnit(id); if (u) await selectUnit(u);   // keep working the holds
+    } catch (e) { err(e); }
   }
   async function doDemoBridge(id, x, y) {
     try { const j = await api("/api/demolish_bridge", { unit: id, x, y }); sel = null; loadState(j.state); toast("Bridge demolished.", "good"); }
@@ -1268,7 +1271,7 @@
     const built = (t.sites || []).join(" / ") + ((t.tech || 1) > 1 ? ` — needs level ${t.tech}` : "");
     const turns = (META.build_times && META.build_times[k]) || 1;
     return `<div><span class="title">${t.code} — ${t.full}</span> ${clsPill(t.cls)}
-      <span class="chip on">target: ${(META.target_class && META.target_class[k]) || "-"}</span></div>
+      <span class="tag-p" style="text-transform:capitalize">${(META.target_class && META.target_class[k]) || "-"}</span></div>
       <div class="sub" style="margin:4px 0 8px">${t.cat} · ${t.desc}</div>
       ${row("HP", t.hp, mx.hp)}${row("Move", t.move, mx.move)}${row("Cost", t.cost, mx.cost)}${row("Vision", t.vis, mx.vis)}
       <div class="dossier-bar"><span>Range</span><b style="flex:1;text-align:left">${t.rng[0] === t.rng[1] ? t.rng[0] : t.rng.join("–")}</b></div>
@@ -1421,6 +1424,7 @@
       case "w": if (sel) doWait(sel.unit.id); break;
       case "f": if (sel) doFound(sel.unit.id); break;
       case "u": { const b = selB || buildingAt(cursor.x, cursor.y); if (b && b.side === "P") doUpgrade(b.x, b.y); break; }
+      case "d": showTab("units"); break;
       case "h": { const hq = state.buildings.find(b => b.type === "HQ" && b.side === "P"); if (hq) { cursor = { x: hq.x, y: hq.y }; updateStatusline(); } break; }
       case "e": requestEndTurn(); break;
       case "s": openSaves(); break;
@@ -1432,7 +1436,6 @@
       case "m": showTab("manual"); break;
       case "r": showTab("records"); break;
       case "c": showTab("chat"); break;
-      case "u": showTab("units"); break;
       case "p": exportBoard(); break;
     }
   });
