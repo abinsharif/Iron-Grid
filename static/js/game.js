@@ -555,7 +555,7 @@
     const inc = b.hp !== undefined && b.max_hp
       ? Math.floor(META.income[b.type] * (1 + 0.5 * (lvl - 1)) * (b.hp <= b.max_hp / 2 ? 0 : b.hp / b.max_hp))
       : Math.floor(META.income[b.type] * (1 + 0.5 * (lvl - 1)));
-    const heal = META.heal[b.type] + (lvl - 1), mine = b.side === "P";
+    const heal = (META.heal[b.type] || 0) + (lvl - 1), mine = b.side === "P";
     const owner = b.side === "P" ? `<span class="tag-p">ours</span>` : b.side === "A" ? `<span class="tag-a">enemy</span>` : "neutral";
     const needT = b.type === "HQ" ? 3 : 2;
     const capTxt = b.cap ? `<div class="forecast">${b.cap.side === "P" ? "Our unit" : "Enemy unit"} is capturing this (${b.cap.pts}/${needT}).</div>` : "";

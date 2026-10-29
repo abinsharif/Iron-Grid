@@ -114,11 +114,15 @@ def heal_amount(b):
 
 
 
+def structure_vitality(b):
+    return b["hp"] / b["max_hp"] if b.get("max_hp") else 1.0
+
+
 def tile_def(game, x, y):
     m = DEF_MULT[game["ter"][y][x]]
     b = building_at(game, x, y)
     if b:
-        m = min(m, B_DEF[b["type"]])
+        m = min(m, B_DEF[b["type"]] * structure_vitality(b))
     return m
 
 

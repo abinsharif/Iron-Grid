@@ -1,6 +1,6 @@
 # IRON GRID
 
-**Current version: v4.6.6** — tiered turn-based tactics for your LAN. One account, six complete games: pick a ruleset,
+**Current version: v4.7.3** — tiered turn-based tactics for your LAN. One account, six complete games: pick a ruleset,
 pick a battlefield, pick an enemy — from the 4-unit Skirmish to combined-arms, engineers,
 doctrines, air power, and full naval war. Server-authoritative Flask + canvas, SQLite
 persistence, LAN multiplayer with in-game chat.
@@ -12,9 +12,7 @@ persistence, LAN multiplayer with in-game chat.
 
 <!-- Drop images into an `images/` folder and update these paths -->
 
-| Battlefield | Lobby |
-|---|---|
-| ![Battlefield](images/battlefield.png) | ![Lobby](images/lobby.png) |
+![Battlefield](images/battlefield.png)
 
 ## Why IRON GRID
 
@@ -48,7 +46,7 @@ just to build.
 ### Economy that fights back
 
 - **HQs and cities are money.** Factories build armor and guns but cost 40/turn in upkeep;
-  barracks train infantry at −50/turn; harbors and ports *earn* trade income (+200/+120).
+  barracks train infantry at −50/turn; harbors and ports *earn* trade income (+200/+1234).
 - **Buildings have HP.** Everything can be bombarded — income scales with structural
   health, past-half buildings stop producing, overkill destroys, and you choose: repair or
   upgrade (which also hardens and heals the structure to full). Forward structures you

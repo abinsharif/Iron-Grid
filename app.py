@@ -3,18 +3,8 @@ IRON GRID V4 - turn-based tactics, server-authoritative.
 
 Flask owns the state, validates every move, runs the (fog-bound, non-cheating)
 AI, and persists saves, accounts, ranks and the Hall of Fame in SQLite (irongrid.db).
-
-V4 additions:
-  * Six AI doctrines in fixed order: beginner, easy, normal, medium, hard, extreme.
-  * Accounts (register/login, hashed passwords) in the same irongrid.db.
-  * Rank 0..1000 per player: 0-99 Beginner, 100-199 INF ... 800-899 FTR,
-    900-999 Legend, 1000 Iron Marshal. Ranks move with every result vs AI or players.
-  * LAN lobby page (/lobby): play vs AI, challenge other players on the network.
-  * Hall of Fame: one best verified win per AI level, across all players.
-
-Run:  pip install flask  &&  python app.py  ->  serves on 0.0.0.0:5000 (LAN visible)
 """
-import heapq
+
 import json
 import os
 import random
@@ -41,10 +31,13 @@ app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0      # pick up js/css updates immedi
 LOCK = threading.RLock()
 GAMES = {}
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "irongrid.db")
+DB_FILE = os.environ.get(
+    "IRON_GRID_DB_FILE",
+    os.path.join(BASE_DIR, "irongrid.db"),
+)
 LEGACY_RECORDS = os.path.join(BASE_DIR, "records.json")
 SAVE_VERSION = 4
-APP_VERSION = "4.7.1"
+APP_VERSION = "4.7.3"
 
 # ========================================================================
 # map & terrain
@@ -174,15 +167,19 @@ def counter_calc(game, dfn, att):
 
 def calc_damage(game, att, dfn):
     ab = 0
-    if doctrine_of(game, att["side"]) == "fire" and UNITS[att["type"]]["indirect"]:
+    doc = doctrine_of(game, att["side"])
+    scale = 1.0
+    if doc == "fire" and UNITS[att["type"]]["indirect"]:
         ab += 1
+    if doc == "guerrilla" and UNITS[att["type"]]["cat"] in ("Infantry", "Infantry Support"):
+        scale *= 1.15
     dt = 1.0
     if doctrine_of(game, dfn["side"]) == "territ":
         b = building_at(game, dfn["x"], dfn["y"])
         if b is not None and b["side"] == dfn["side"]:
             dt *= 0.9
     return dmg_calc(game, att["type"], att["hp"], dfn["type"], dfn["x"], dfn["y"],
-                    abonus=ab, dtaken=dt)
+                    scale=scale, abonus=ab, dtaken=dt)
 
 
 # ---------------- log ----------------
@@ -259,7 +256,10 @@ def air_rules(game):
 
 def unit_move(game, u):
     m = UNITS[u["type"]]["move"]
-    if doctrine_of(game, u["side"]) == "mech" and UNITS[u["type"]]["cls"] == "tread":
+    doc = doctrine_of(game, u["side"])
+    if doc == "mech" and UNITS[u["type"]]["cls"] == "tread":
+        m += 1
+    if doc == "aircav" and UNITS[u["type"]]["cls"] == "air":
         m += 1
     return m
 
@@ -307,7 +307,8 @@ def walk(game, unit, path):
         occ = unit_at(game, tile[0], tile[1])
         if occ is not None and dom_of(occ) == dom:
             if occ["side"] == unit["side"]:
-                idx += 1                          # friends never block movement
+                last_ok = tile                    # friends never block: pass through
+                idx += 1
                 continue
             blockers.add(tile)
             dist, par = dijkstra(game, UNITS[unit["type"]]["cls"], start[0], start[1],
@@ -469,6 +470,8 @@ def maybe_capture(game, unit, events):
         return
     prev = b["side"]
     _need = {1: tier1, 2: tier2}.get(game.get("tier", 2), tier3).capture_need(b["type"])
+    if doctrine_of(game, unit["side"]) == "guerrilla":
+        _need = max(1, _need - 1)          # seasoned partisans take ground faster
     if _need > 1:
         need = _need
         cap = b.get("cap")
@@ -539,6 +542,7 @@ def check_annihilation(game):
 def heal_units(game, side, events):
     """Localized repair: aircraft at airfields, ships beside docks, land units on land buildings."""
     def repair(u, b, rate):
+        rate = int(rate * structure_vitality(b))
         t = UNITS[u["type"]]
         if u["hp"] >= t["hp"] or rate <= 0:
             return
@@ -569,7 +573,7 @@ def heal_units(game, side, events):
         if cls == "air":
             b = building_at(game, u["x"], u["y"])
             if b is not None and b["side"] == side and b["type"] in ("airbase", "airfield"):
-                repair(u, b, 4 if b["type"] == "airbase" else 2)
+                repair(u, b, (4 if b["type"] == "airbase" else 2) + (b.get("level", 1) - 1))  # 4/6/8 and 2/3/4, scaled by HP
         elif cls == "sea":
             for b in docks:
                 if man(u["x"], u["y"], b["x"], b["y"]) == 1:
@@ -592,7 +596,7 @@ def battery_fire(game, side, events):
             continue
         targets = [u for u in game["units"] if u["side"] != side
                    and UNITS[u["type"]]["cls"] == "sea" and (u["x"], u["y"]) in vis
-                   and 2 <= man(b["x"], b["y"], u["x"], u["y"]) <= 4]
+                   and 1 <= man(b["x"], b["y"], u["x"], u["y"]) <= 1 + b.get("level", 1)]
         if not targets:
             continue
         t = max(targets, key=lambda u: UNITS[u["type"]]["cost"] * u["hp"] / UNITS[u["type"]]["hp"])
@@ -701,11 +705,13 @@ def begin_turn(game, side, events=None):
             if b is not None and b["side"] != side:
                 maybe_capture(game, u, events)   # holding the ground is a capture action
     if air_rules(game):
+        FUEL_RATE = {"airfield": {1: 40, 2: 60, 3: 100}, "airbase": {1: 60, 2: 100, 3: 150}}
         for u in game["units"]:
             if u["side"] == side and UNITS[u["type"]]["cls"] == "air":
                 b = building_at(game, u["x"], u["y"])
-                if b is not None and b["side"] == side and b["type"] in ("HQ", "airfield"):
-                    u["fuel"] = fuel_for(game, u["type"])
+                if b is not None and b["side"] == side and b["type"] in ("airbase", "airfield"):
+                    rate = FUEL_RATE[b["type"]].get(b.get("level", 1), 60)
+                    u["fuel"] = min(fuel_for(game, u["type"]), u.get("fuel", 0) + rate)
     heal_units(game, side, events)
     if game.get("tier", 2) >= 4:
         up = sum(UPKEEP.get(u["type"], UPKEEP.get("_" + UNITS[u["type"]]["cls"], 2))
@@ -1300,6 +1306,22 @@ def ai_construct(game, unit, cfg, ctx):
                            f"{label(unit['x'], unit['y'])}, -300 cr.",
                  unit["x"], unit["y"], aud=side)
             return True
+        if game.get("tier", 2) >= 6 and building_at(game, unit["x"], unit["y"]) is None \
+                and not unit.get("built_battery") and game["credits"][side] >= 800 \
+                and any(in_b(game, unit["x"] + dx, unit["y"] + dy)
+                        and game["ter"][unit["y"] + dy][unit["x"] + dx] == "O" for dx, dy in DIRS):
+            game["credits"][side] -= 800
+            game["buildings"].append({"type": "battery", "x": unit["x"], "y": unit["y"],
+                                      "side": side, "level": 1,
+                                      "id": 9000 + len(game["buildings"]),
+                                      "hp": 20, "max_hp": 20})
+            unit["built_battery"] = True
+            unit["moved"] = unit["acted"] = True
+            glog(game, "build", "info",
+                 lambda S: f"⚒ {uname(unit, S)} raised a coastal battery at "
+                           f"{label(unit['x'], unit['y'])}, -800 cr.",
+                 unit["x"], unit["y"], aud=side)
+            return True
         if c == "." and game["credits"][side] >= 200:
             game["credits"][side] -= 200
             force_tile(game, unit["x"], unit["y"], "=")
@@ -1403,7 +1425,7 @@ def ai_build_weights(game, cfg, ctx, a_units, cred, threatened):
          "ht": 1.4, "sf": 0.8, "how": 0.9 if cred > 1200 else 0.0,
          "uav": 0.8 if cnt["uav"] < 1 else 0.1, "cv": 0.6,
          "intr": 1.2, "sb": 0.7 if cred > 2000 else 0.0, "th": 0.2,
-         "aa": 2.2 if air >= 1 else 0.0, "td": 0.8,
+         "aa": 1.3 if air >= 2 else 0.0, "td": 0.8,
          "cor": 0.9, "fr": 1.2, "dd": 1.2 if ek["sub"] else 0.6,
          "ca": 0.8 if cred > 2000 else 0.0, "sub": 1.0, "ls": 0.0}
     if air:
@@ -1414,6 +1436,7 @@ def ai_build_weights(game, cfg, ctx, a_units, cred, threatened):
         if armor >= 3:
             w["heli"] *= 2.5
             w["mrl"] *= 1.8
+            w["mbt"] *= 1.3
         if ek["inf"] >= 4:
             w["ifv"] *= 1.8
             w["mrl"] *= 1.4
@@ -1477,8 +1500,9 @@ def ai_produce(game, cfg, ctx):
 
 def ai_found_upgrade(game, cfg, ctx):
     cred = game["credits"]["A"]
-    if cfg["upgrades"] and cred >= 1800:
-        cand = [b for b in game["buildings"] if b["side"] == "A" and b["type"] in ("HQ", "factory")
+    if cfg["upgrades"] and cred >= 1500:
+        cand = [b for b in game["buildings"] if b["side"] == "A"
+                and b["type"] in ("HQ", "factory", "airbase", "shipyard")
                 and b.get("level", 1) < MAX_B_LEVEL]
         if cand:
             b = min(cand, key=lambda b: b.get("level", 1))
@@ -1776,8 +1800,8 @@ def api_battery_fire():
             return fail("target must be an enemy ship")
         if (tgt["x"], tgt["y"]) not in vision(game, side):
             return fail("no spotting on the target")
-        if not 2 <= man(b["x"], b["y"], tgt["x"], tgt["y"]) <= 4:
-            return fail("out of range (2-4)")
+        if not 1 <= man(b["x"], b["y"], tgt["x"], tgt["y"]) <= 1 + b.get("level", 1):
+            return fail(f"out of range (1-{1 + b.get('level', 1)})")
         dmg = DEFENSES["battery"]["power"] + 2 * (b.get("level", 1) - 1)
         eff = min(dmg, tgt["hp"])
         tgt["hp"] -= eff
@@ -2163,8 +2187,7 @@ def api_unload():
             return fail("that transport is empty")
         if not in_b(game, x, y) or man(u["x"], u["y"], x, y) != 1:
             return fail("unload to an adjacent tile")
-        if unit_at(game, x, y) is not None:
-            return fail("tile occupied")
+        # the pad may be occupied: the order simply waits for it to clear
         if game["ter"][y][x] in ("W", "O"):
             return fail("cannot unload into water")
         if u["type"] == "ls":
@@ -2510,6 +2533,8 @@ def resolve_building_attack(game, att, bl, events):
                    bl["x"], bl["y"])
     if destroyed:
         game["buildings"] = [b for b in game["buildings"] if b["id"] != bl["id"]]
+        for s2 in ("P", "A"):
+            game["p_known_b"][s2].pop(f"{bl['x']},{bl['y']}", None)
         st["kills" if att["side"] == "P" else "losses"] += 1
         if bl["type"] == "HQ":
             game["result"] = {"winner": att["side"], "reason": "hq_destroyed"}
@@ -2593,8 +2618,7 @@ def api_build():
         if b is None or b["side"] != side or b["type"] not in ("factory", "barracks",
                                                                "airbase", "shipyard", "harbor"):
             return fail("cannot build here")
-        if unit_at(game, x, y) is not None:
-            return fail("tile occupied")
+        # the pad may be occupied: the order waits for it to clear
         if utype not in UNITS:
             return fail("unknown unit")
         if utype not in TIERS[game.get("tier", 2)]["units"]:
