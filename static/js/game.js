@@ -748,6 +748,18 @@
 
   // ---------------------------------------------------------------- actions
   function cancelSel() { sel = null; selB = null; updateInfo(); }
+  function movementAnimationPath(type, from, to, route) {
+    const cls = (U(type) || UDEF).cls;
+    return cls === "air" || cls === "sea" ? [[from[0], from[1]], [to[0], to[1]]] : route;
+  }
+  function movementAnimationDuration(path, base, perStep, max) {
+    const steps = path && path.length > 2
+      ? path.length - 1
+      : path && path.length === 2
+        ? Math.hypot(path[1][0] - path[0][0], path[1][1] - path[0][1])
+        : 1;
+    return speed(Math.min(max, base + perStep * Math.max(0, steps - 1))) || 1;
+  }
   async function selectUnit(u) {
     if (busy || state.over || u.side !== "P") return;
     try {
@@ -764,8 +776,11 @@
     try {
       const j = await api("/api/move", { unit: id, x, y });
       const mv = (j.events || []).find(e => e.t === "move");
-      if (mv) anim = { id, fx: from.x, fy: from.y, tx: mv.to[0], ty: mv.to[1], start: performance.now(), path: mv.path,
-                       dur: speed(mv.path && mv.path.length > 2 ? Math.min(950, 180 + 80 * (mv.path.length - 1)) : 300) || 1 };
+      if (mv) {
+        const path = movementAnimationPath(mv.u.type, [from.x, from.y], mv.to, mv.path);
+        anim = { id, fx: from.x, fy: from.y, tx: mv.to[0], ty: mv.to[1], start: performance.now(), path,
+                 dur: movementAnimationDuration(path, 300, 80, 950) };
+      }
       loadState(j.state); await showEvents(j.events); beep("move");
       const u = findUnit(id);
       const spent = !u || u.acted || (u.moved && !(U(u.type) || UDEF).move_fire);
@@ -974,8 +989,9 @@
     if (e.t === "move") {
       let u = findUnit(e.u.id);
       if (!u) { u = Object.assign({ mhp: (U(e.u.type) || UDEF).hp, moved: true, acted: true }, e.u); u.x = e.from[0]; u.y = e.from[1]; state.units.push(u); }
-      anim = { id: u.id, fx: e.from[0], fy: e.from[1], tx: e.to[0], ty: e.to[1], start: performance.now(), fade: e.fade, path: e.path,
-               dur: speed(e.path && e.path.length > 2 ? Math.min(1000, 200 + 85 * (e.path.length - 1)) : 380) || 1 };
+      const path = movementAnimationPath(e.u.type, e.from, e.to, e.path);
+      anim = { id: u.id, fx: e.from[0], fy: e.from[1], tx: e.to[0], ty: e.to[1], start: performance.now(), fade: e.fade, path,
+               dur: movementAnimationDuration(path, 380, 85, 1000) };
       await sleep(400); u.x = e.to[0]; u.y = e.to[1]; anim = null;
       if (!e.to_vis) state.units = state.units.filter(x => x.id !== u.id);
       else if (!e.from_vis) { pop(e.to[0], e.to[1], "CONTACT", "#ff6b6b"); beep("contact"); }

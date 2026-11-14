@@ -1,6 +1,6 @@
 # IRON GRID
 
-**Current version: v4.9.1** — tiered turn-based tactics for your LAN. One account, six complete games: pick a ruleset,
+**Current version: v4.9.9** — tiered turn-based tactics for your LAN. One account, six complete games: pick a ruleset,
 pick a battlefield, pick an enemy — from the 4-unit Skirmish to combined-arms, engineers,
 doctrines, air power, and full naval war. Server-authoritative Flask + canvas, SQLite
 persistence, LAN multiplayer with in-game chat.
@@ -8,11 +8,6 @@ persistence, LAN multiplayer with in-game chat.
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Flask](https://img.shields.io/badge/flask-3.x-green)
 
-## Screenshots
-
-<!-- Drop images into an `images/` folder and update these paths -->
-
-![Battlefield](images/battlefield.png)
 
 ## Why IRON GRID
 
@@ -71,6 +66,21 @@ just to build.
   (M / 1-9 / B / Esc) resolves genuine conflicts; right-click deselects. Aircraft refuel at
   airfields; transports show their cargo manifest and share damage with it proportionally.
 
+### Battlefield view and camera
+
+- **Make room for the battlefield.** The adaptive layout trims unused space, and the battle
+  information panel can be collapsed and restored. Tile scale can automatically fit the
+  map to the available viewport.
+- **Choose your view.** Strategic, Standard, and Tactical presets range from a full-board
+  overview to a close tactical view. Manual zoom is also available, with a 20%-300% range.
+- **Navigate directly.** Zoom toward the pointer, drag to pan, double-click a tile to centre
+  on it, or use the keyboard cursor. The minimap shows explored terrain and the current
+  viewport, and supports click-and-drag navigation. Enemy units are shown only when visible.
+- **Keep the board readable.** Optional zoom-aware level of detail simplifies distant
+  terrain and markers while keeping essential units and health indicators visible. Camera,
+  layout, minimap, sound, and display preferences are saved in the browser. Settings are
+  grouped into View, Camera, Sound, and Gameplay categories.
+
 ### Ten AI doctrines — zero cheats
 
 Beginner → Very Easy → Easy → Medium → Hard → Very Hard → Extreme → Relentless → Merciless
@@ -103,24 +113,17 @@ python app.py
 
 Open `http://127.0.0.1:5000` on this machine. Other devices on the network open
 `http://<this-PC's-LAN-IP>:5000` and land in the lobby to register or log in.
-
-```
-app.py            the game engine and API (behaviour only)
-gamedata.py       ALL static data: 31 units, seven-class attack matrix, 28 maps, tiers,
-                  doctrines, AI ladders, production rules
-helpers.py        shared pure functions
-tiers/            tier1.py … tier8.py — per-tier rule modules
-templates/        battlefield + lobby (Bootstrap-styled, dark/light themes)
-static/           canvas renderer, lobby wizard, sounds
-irongrid.db       created automatically on first run (accounts, saves, records)
-```
+You can also play on the online server at
+[abinsharif.pythonanywhere.com](https://abinsharif.pythonanywhere.com/).
 
 ## Rules in sixty seconds
 
 Move, then attack or wait. Capture income buildings; repair on friendly ones; take the
 enemy HQ or destroy everything. Terrain matters — forests and villages soften blows,
 mountains block vehicles, rivers need bridges, roads and rails speed ground movement.
-Aircraft watch their fuel; ships keep to open water; everyone pays upkeep from tier 4.
+Aircraft watch their fuel and fly directly to their destination; ships keep to open water
+and glide directly there. Ground units follow their routed paths. Everyone pays upkeep
+from tier 4.
 Full details live in the in-game **Manual** and **Units** tabs — searchable, per-tier,
 with every stat, matchup chip, and production rule.
 
@@ -128,7 +131,6 @@ with every stat, matchup chip, and production rule.
 
 - `IRON_GRID_SECRET_KEY` — set it so logins survive restarts (never commit it).
 - `IRON_GRID_HOST` / `IRON_GRID_PORT` — default `0.0.0.0` / `5000`.
-- `FLASK_DEBUG=1` — development debugger; leave unset when hosting.
 
 ## Tutorials
 
