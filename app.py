@@ -3,8 +3,10 @@ IRON GRID V4 - turn-based tactics, server-authoritative.
 
 Flask owns the state, validates every move, runs the (fog-bound, non-cheating)
 AI, and persists saves, accounts, ranks and the Hall of Fame in SQLite (irongrid.db).
-"""
 
+Run:  pip install flask  &&  python app.py  ->  serves on 0.0.0.0:5000 (LAN visible)
+"""
+import heapq
 import json
 import os
 import random
@@ -14,16 +16,18 @@ import threading
 import time
 import uuid
 from collections import Counter
+from collections.abc import Set as AbstractSet
 from contextlib import closing
 from functools import wraps
-from typing import TypedDict, cast
+from typing import TypedDict
 
-from flask import Flask, jsonify, redirect, render_template, request, session
+from flask import Flask, g, jsonify, redirect, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import tutorials as TUT
 from gamedata import *
 from helpers import *
-from tiers import tier1, tier2, tier3, tier4, tier5, tier6
+from tiers import tier1, tier2, tier3, tier5, tier6
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("IRON_GRID_SECRET_KEY") or secrets.token_hex(32)
@@ -31,13 +35,10 @@ app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0      # pick up js/css updates immedi
 LOCK = threading.RLock()
 GAMES = {}
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.environ.get(
-    "IRON_GRID_DB_FILE",
-    os.path.join(BASE_DIR, "irongrid.db"),
-)
-LEGACY_RECORDS = os.path.join(BASE_DIR, "records.json")
+DB_FILE = os.path.join(os.path.expanduser("~"), "Iron-Grid", "irongrid.db")
+os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
 SAVE_VERSION = 4
-APP_VERSION = "4.7.3"
+APP_VERSION = "4.9.1"
 
 # ========================================================================
 # map & terrain
@@ -216,7 +217,7 @@ def glog(game, cat, tone, text, x=None, y=None, aud="both", gate=True):
 
 
 # ---------------- pathing ----------------
-def dijkstra(game, cls, sx, sy, budget=None, blocked=frozenset()):   # blocked: set | frozenset
+def dijkstra(game, cls, sx, sy, budget=None, blocked: AbstractSet[tuple[int, int]] = frozenset()):
     step = STEP[cls]
     dist = {(sx, sy): 0.0}
     par = {}
@@ -518,9 +519,11 @@ def maybe_capture(game, unit, events):
              b["x"], b["y"], aud="both")
     for k, v in r.items():
         out.setdefault(k, []).extend(v)
-    events.append({"t": "capture", "x": b["x"], "y": b["y"], "side": unit["side"],
-                   "btype": b["type"], "level": b.get("level", 1),
-                   "log": out.get("P", [])})
+    if game.get("mode", "ai") != "ai" or unit["side"] == "P" or prev == "P" \
+            or (b["x"], b["y"]) in vision(game, "P"):
+        events.append({"t": "capture", "x": b["x"], "y": b["y"], "side": unit["side"],
+                       "btype": b["type"], "level": b.get("level", 1),
+                       "log": out.get("P", [])})
 
 
 def check_annihilation(game):
@@ -591,6 +594,7 @@ DEFENSES = tier6.DEFENSES
 def battery_fire(game, side, events):
     """Coastal batteries fire once each at the strongest visible enemy ship in range."""
     vis = vision(game, side)
+    pv = vision(game, "P")
     for b in game["buildings"]:
         if b["type"] != "battery" or b["side"] != side:
             continue
@@ -604,6 +608,7 @@ def battery_fire(game, side, events):
         eff = min(dmg, t["hp"])
         t["hp"] -= eff
         killed = t["hp"] <= 0
+        p_log = []
         st = game["stats"]
         if side == "P":
             st["dealt"] += eff
@@ -613,8 +618,7 @@ def battery_fire(game, side, events):
             st["losses"] += int(killed)
         if killed:
             game["units"] = [u for u in game["units"] if u["id"] != t["id"]]
-        pv = vision(game, "P")
-        p_log = []
+            p_log = []
         if t["side"] == "P" or (t["x"], t["y"]) in pv:
             entries = glog(game, "combat", "good" if side == "P" else "bad",
                            f"☗ Coastal battery at {label(b['x'], b['y'])} hit "
@@ -622,9 +626,10 @@ def battery_fire(game, side, events):
                            + (" — destroyed!" if killed else "."),
                            t["x"], t["y"])
             p_log = entries.get("P", [])
-        events.append({"t": "combat", "a": None, "d": snap(t), "a_hp1": 0, "d_hp1": t["hp"],
-                       "dmg": eff, "counter": 0, "dk": killed, "ak": False, "ind": True,
-                       "log": p_log})
+        if game.get("mode", "ai") != "ai" or t["side"] == "P" or (t["x"], t["y"]) in pv:
+            events.append({"t": "combat", "a": None, "d": snap(t), "a_hp1": 0, "d_hp1": t["hp"],
+                           "dmg": eff, "counter": 0, "dk": killed, "ak": False, "ind": True,
+                           "log": p_log})
     check_annihilation(game)
 
 
@@ -647,34 +652,41 @@ def process_queue(game, side, events):
             continue
         q["left"] -= 1
         if q["left"] > 0:
+            qx, qy, qutype, qleft = q["x"], q["y"], q["utype"], q["left"]
             glog(game, "build", "info",
-                 lambda S: f"⚙ Producing {UNITS[q['utype']]['code']} — {q['left']} turn(s) left.",
-                 q["x"], q["y"], aud=side)
+                 lambda S, qx=qx, qy=qy, qutype=qutype, qleft=qleft: (
+                     f"⚙ Producing {UNITS[qutype]['code']} — {qleft} turn(s) left."
+                 ),
+                 qx, qy, aud=side)
             continue
         nu = spawn_unit(game, side, q["utype"], q.get("sx", q["x"]), q.get("sy", q["y"]))
         nu["moved"] = nu["acted"] = False        # fresh from the yard: ready to act
         game["prod"] = [o for o in game["prod"] if o is not q]
+        qx, qy = q["x"], q["y"]
         glog(game, "build", "good",
-             lambda S: f"⚙ {uname(nu, S)} rolled out at {label(q['x'], q['y'])}.",
-             q["x"], q["y"], aud=side)
+             lambda S, nu=nu, qx=qx, qy=qy: f"⚙ {uname(nu, S)} rolled out at {label(qx, qy)}.",
+             qx, qy, aud=side)
         events.append({"t": "built", "u": snap(nu), "log": []})
     for q in list(game.get("bldprod", [])):
         if q["side"] != side:
             continue
         q["left"] -= 1
         if q["left"] > 0:
+            qx, qy, qleft = q["x"], q["y"], q["left"]
             glog(game, "build", "info",
-                 lambda S: f"⚒ Airfield construction at {label(q['x'], q['y'])} — "
-                           f"{q['left']} turn(s) left.", q["x"], q["y"], aud=side)
+                 lambda S, qx=qx, qy=qy, qleft=qleft: (
+                     f"⚒ Airfield construction at {label(qx, qy)} — {qleft} turn(s) left."
+                 ), qx, qy, aud=side)
             continue
         nb = {"type": "airfield", "x": q["x"], "y": q["y"], "side": side, "level": 1,
               "id": 9000 + len(game["buildings"]),
               "hp": BLD_HP["airfield"], "max_hp": BLD_HP["airfield"]}
         game["buildings"].append(nb)
         game["bldprod"] = [o for o in game["bldprod"] if o is not q]
+        qx, qy = q["x"], q["y"]
         glog(game, "build", "good",
-             lambda S: f"⚒ Airfield operational at {label(q['x'], q['y'])}.", q["x"], q["y"], aud=side)
-        events.append({"t": "built", "x": q["x"], "y": q["y"], "log": []})
+             lambda S, qx=qx, qy=qy: f"⚒ Airfield operational at {label(qx, qy)}.", qx, qy, aud=side)
+        events.append({"t": "built", "x": qx, "y": qy, "log": []})
     for b in game["buildings"]:
         if b["side"] == side and b.get("upgrading"):
             b["upgrading"] -= 1
@@ -684,9 +696,12 @@ def process_queue(game, side, events):
                 if b.get("max_hp"):
                     b["max_hp"] += 10                    # upgrades harden the structure
                     b["hp"] = min(b["max_hp"], b["hp"] + 10)   # +10 current, never a free full repair
+                bx, by, b_level = b["x"], b["y"], b["level"]
                 glog(game, "build", "good",
-                     lambda S: f"⚙ {bname(b)} at {label(b['x'], b['y'])} reached L{b['level']}.",
-                     b["x"], b["y"], aud=side)
+                     lambda S, b=b, bx=bx, by=by, b_level=b_level: (
+                         f"⚙ {bname(b)} at {label(bx, by)} reached L{b_level}."
+                     ),
+                     bx, by, aud=side)
 
 
 def begin_turn(game, side, events=None):
@@ -698,6 +713,7 @@ def begin_turn(game, side, events=None):
             u["moved"] = u["acted"] = False
     if side == "A":
         battery_fire(game, side, events)      # the AI's batteries fire automatically
+        ai_maintain(game)                     # ...and its engineers patch the damage
     process_queue(game, side, events)
     for u in list(game["units"]):
         if u["side"] == side and UNITS[u["type"]]["capture"]:
@@ -762,7 +778,7 @@ def new_game(level="normal", mode="ai", opponent=None, map_idx=0, tier=2, doctri
                           if B_TIER.get(b["type"], 1) <= tier],
             "units": [], "next_uid": 1, "result": None, "log": {"P": [], "A": []}, "log_seq": 1, "chat": [],
             "stats": {"kills": 0, "losses": 0, "dealt": 0, "taken": 0, "repaired": 0},
-            "prod": [],
+            "prod": [], "tutorial": None,
             "doctrine": dict(doctrines or {"P": "territ", "A": "territ"}),
             "ai_mem": {}, "p_seen": {"P": [], "A": []}, "p_known_b": {"P": {}, "A": {}} ,
             "rank_note": {}, "rank_applied": False,
@@ -842,6 +858,8 @@ def my_seat(game) -> str | None:
 
 def public_state(game, side=None):
     """Viewer-relative state: the viewer's side is always relabeled to 'P'."""
+    touch_game(game)
+    advance_tutorial(game)
     if side is None:
         side = my_seat(game) or "P"
     vis = vision(game, side)
@@ -895,6 +913,12 @@ def public_state(game, side=None):
             reason = "Enemy HQ captured" if win_me else "Your HQ was captured"
         elif res["reason"] == "hq_destroyed":
             reason = "Enemy HQ destroyed" if win_me else "Your HQ was destroyed"
+        elif game.get("tutorial") and win_me:
+            reason = TUT.TUTORIALS[game["tutorial"]["tier"]]["complete"]["title"]
+        elif game.get("tutorial"):
+            reason = "Training mission failed - retry from the training menu"
+        elif res["reason"] == "abandon":
+            reason = "Enemy abandoned the battle" if win_me else "You abandoned the battle"
         else:
             reason = "Enemy forces destroyed" if win_me else "Your forces were destroyed"
         res = {"winner": "P" if win_me else "A", "reason": reason}
@@ -920,6 +944,7 @@ def public_state(game, side=None):
             "log": game["log"][side][-250:], "stats": stats,
             "opp_online": opp_online, "opp_seen": opp_seen,
             "queue": [dict(q) for q in game["prod"] if q["side"] == side],
+            "tutorial": tutorial_payload(game),
             "can_record": False,
             "id": game["id"]}
 
@@ -1082,14 +1107,26 @@ def ai_goal(game, cfg, ctx, u):
     hr = u["hp"] / t["hp"]
     known = ctx["known"]
     if cfg["retreat"] and hr <= cfg["retreat"]:
-        h = ai_heal_site(game, ctx, u)
-        if h:
-            return {"tile": h, "mode": "heal"}
-    # Artillery hunters: gunships, jets and recon actively hunt rocket/missile batteries.
-    if cfg["counters"] and u["type"] in ("heli", "jet", "afv"):
-        batteries = [e for e in known if e["type"] in ("mrl", "sam")]
-        if batteries:
-            t = min(batteries, key=lambda e: man(u["x"], u["y"], e["x"], e["y"]))
+        support = any(a["id"] != u["id"] and a["side"] == u["side"]
+                      and manu(a, u) <= 4 and UNITS[a["type"]]["cost"] >= 400
+                      for a in game["units"])
+        if not support:                       # no strong friends nearby: fall back and repair
+            h = ai_heal_site(game, ctx, u)
+            if h:
+                return {"tile": h, "mode": "heal"}
+    # Tier hunters: each unit type chases the prey its tier module names.
+    mod = tier_mod(game)
+    if cfg["counters"] and u["type"] in ("heli", "jet", "afv", "ah", "sub"):
+        if u["type"] in getattr(mod, "AIR_HUNTERS", ()):
+            airfoe = [e for e in known if UNITS[e["type"]]["cls"] == "air"]
+            if airfoe:
+                t = min(airfoe, key=lambda e: man(u["x"], u["y"], e["x"], e["y"]))
+                return {"tile": (t["x"], t["y"]), "mode": "attack", "hold": 0}
+        prey_fn = getattr(mod, "ai_hunters", None)
+        prey = prey_fn(u["type"]) if prey_fn else ["mrl", "sam"]
+        targets = [e for e in known if e["type"] in prey]
+        if targets:
+            t = min(targets, key=lambda e: man(u["x"], u["y"], e["x"], e["y"]))
             return {"tile": (t["x"], t["y"]), "mode": "attack", "hold": 0}
     if ctx["hq_threat"] is not None and u["type"] != "sam" and u["id"] not in ctx.get("raiders", ()):
         e = ctx["hq_threat"]
@@ -1138,10 +1175,12 @@ def ai_attack_eval(game, cfg, u, dest, e, kb=1.0):
     if dmg <= 0:
         return None
     eff = min(dmg, e["hp"])
+    kill = eff >= e["hp"]
+    if not kill and eff / e["hp"] < 0.2:
+        return None
     val = cfg["dmg_w"] * eff / et["hp"] * et["cost"] / 25.0
     if e["type"] in ("mrl", "sam"):
         val *= 1.6                      # counter-battery: rockets and SAMs die first
-    kill = eff >= e["hp"]
     if kill:
         val += cfg["kill"] * kb * et["cost"] / 25.0
     else:
@@ -1216,9 +1255,10 @@ def ai_score_dest(game, cfg, ctx, u, dest, cur, goal, focus, occ_sec):
         if any(UNITS[e["type"]]["cost"] >= 250 and man(dest[0], dest[1], e["x"], e["y"]) <= reach
                for e in ctx["known"]):
             s += cfg["stealth"] * 1.2          # lurk in the fog, strike from out of sight
-    if cfg["flank"] and focus is not None and dest != (focus["x"], focus["y"])             and man(dest[0], dest[1], focus["x"], focus["y"]) <= 3:
-        if sector(focus["x"], focus["y"], dest[0], dest[1]) not in occ_sec:
-            s += cfg["flank"]
+    if (cfg["flank"] and focus is not None and dest != (focus["x"], focus["y"]) and
+            man(dest[0], dest[1], focus["x"], focus["y"]) <= 3 and
+            sector(focus["x"], focus["y"], dest[0], dest[1]) not in occ_sec):
+        s += cfg["flank"]
     if t["indirect"] and not attacking:
         lo, hi = t["rng"]
         if any(lo <= man(dest[0], dest[1], e["x"], e["y"]) <= hi + 1 for e in ctx["known"]):
@@ -1229,16 +1269,50 @@ def ai_score_dest(game, cfg, ctx, u, dest, cur, goal, focus, occ_sec):
     return s
 
 
+def fog_edge_tile(game, pv, ref):
+    """Nearest tile the player CANNOT see, scanned from a tile the player CAN see.  Used so enemy movement
+    into/out of the fog is shown as walking into/out of darkness without revealing the hidden endpoint."""
+    w, h = dims(game)
+    for r in range(1, max(w, h) + 1):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if max(abs(dx), abs(dy)) != r:
+                    continue
+                x, y = ref[0] + dx, ref[1] + dy
+                if 0 <= x < w and 0 <= y < h and (x, y) not in pv:
+                    return (x, y)
+    return None
+
+
+def redact_move_event(game, ev, pv, start, final):
+    """Never ship the hidden endpoint of an enemy move (coordinates or unit snapshot) to the player."""
+    if not (ev["from_vis"] and ev["to_vis"]):
+        ev.pop("path", None)
+    if ev["from_vis"] and not ev["to_vis"]:
+        edge = fog_edge_tile(game, pv, start) or start
+        ev["to"] = list(edge)
+        ev["u"]["x"], ev["u"]["y"] = edge
+        ev["fade"] = "out"
+    elif ev["to_vis"] and not ev["from_vis"]:
+        ev["from"] = list(fog_edge_tile(game, pv, final) or final)
+        ev["fade"] = "in"
+    return ev
+
+
 def ai_move(game, unit, dest, par, events):
-    start = (unit["x"], unit["y"])
-    final, amb = walk(game, unit, path_to(par, start, dest))
     pv = vision(game, "P")
+    start = (unit["x"], unit["y"])
+    route = path_to(par, start, dest)
+    final, amb = walk(game, unit, route)
     unit["x"], unit["y"] = final
     unit["moved"] = True
     from_vis, to_vis = start in pv, final in pv
     if from_vis or to_vis:
         ev = {"t": "move", "u": snap(unit), "from": list(start), "to": list(final),
               "from_vis": from_vis, "to_vis": to_vis}
+        travelled = route[:route.index(final) + 1] if final in route else []
+        if from_vis and to_vis and len(travelled) > 1 and all(p in pv for p in travelled):
+            ev["path"] = [list(p) for p in travelled]          # animation route; never sent if any step is hidden
         ev_log = []
         def mv(S):
             if unit["side"] == S:
@@ -1256,7 +1330,7 @@ def ai_move(game, unit, dest, par, events):
                            final[0], final[1]).get("P", [])
         if ev_log:
             ev["log"] = ev_log
-        events.append(ev)
+        events.append(redact_move_event(game, ev, pv, start, final))
     if amb is not None and amb["side"] == "P":
         entries = glog(
             game, "contact", "good",
@@ -1266,6 +1340,30 @@ def ai_move(game, unit, dest, par, events):
         events.append({"t": "ambush", "x": amb["x"], "y": amb["y"],
                        "log": entries.get("P", [])})
     maybe_capture(game, unit, events)
+
+
+def ai_maintain(game):
+    """The AI patches its battered structures (5 cr/HP), prioritising production sites."""
+    if game["credits"]["A"] < 1200:
+        return
+    prio = {"HQ": 1, "factory": 2, "shipyard": 3, "airbase": 4, "harbor": 5, "port": 6,
+            "barracks": 7, "city": 8}
+    damaged = [b for b in game["buildings"] if b["side"] == "A" and b.get("max_hp")
+               and b["hp"] < b["max_hp"] // 2]
+    damaged.sort(key=lambda b: prio.get(b["type"], 9))
+    for b in damaged[:2]:
+        need = b["max_hp"] - b["hp"]
+        amt = min(need, (game["credits"]["A"] - 800) // BLD_REPAIR_PER_HP)
+        if amt <= 0:
+            return
+        game["credits"]["A"] -= amt * BLD_REPAIR_PER_HP
+        b["hp"] += amt
+        bx, by = b["x"], b["y"]
+        glog(game, "repair", "bad",
+             lambda S, b=b, amt=amt, bx=bx, by=by: (
+                 f"✚ Enemy {bname(b)} repaired +{amt} HP ({label(bx, by)})."
+             ),
+             bx, by)
 
 
 def ai_construct(game, unit, cfg, ctx):
@@ -1285,10 +1383,25 @@ def ai_construct(game, unit, cfg, ctx):
                 force_tile(game, x, y, "B")
                 unit["moved"] = unit["acted"] = True
                 glog(game, "build", "info",
-                     lambda S: f"⚒ {uname(unit, S)} built a bridge at {label(x, y)}, -250 cr.",
+                     lambda S, unit=unit, x=x, y=y: (
+                         f"⚒ {uname(unit, S)} built a bridge at {label(x, y)}, -250 cr."
+                     ),
                      x, y, aud=side)
                 return True
         return False
+    w0, h0 = dims(game)
+    if (game.get("tier", 2) >= 5 and w0 * h0 >= 400 and not unit.get("built_af")
+            and not any(b["side"] == side and b["type"] == "airfield" for b in game["buildings"])
+            and game["credits"][side] >= 3200):
+        game["credits"][side] -= 1500
+        game.setdefault("bldprod", []).append({"side": side, "x": unit["x"], "y": unit["y"],
+                                               "kind": "airfield", "left": 2})
+        unit["built_af"] = True
+        unit["moved"] = unit["acted"] = True
+        glog(game, "build", "info",
+             lambda S: f"⚒ Enemy engineers broke ground for an airfield at "
+                       f"{label(unit['x'], unit['y'])}, -1500 cr.", unit["x"], unit["y"])
+        return True
     if unit["type"] == "eng":
         danger = ai_danger(game, ctx, unit, (unit["x"], unit["y"]))
         near_enemy = any(manu(unit, e) <= 5 for e in ctx["known"])
@@ -1382,9 +1495,8 @@ def ai_act_unit(game, unit, cfg, ctx, events):
         if r is not None and (best is None or r[0] > best[0]):
             best = (r[0], e)
     floor = -3.0 if cfg["rand"] else 0.0
-    if best and best[0] > floor:
-        if resolve_attack(game, unit, best[1], events):
-            ctx["dead"].add(best[1]["id"])
+    if best and best[0] > floor and resolve_attack(game, unit, best[1], events):
+        ctx["dead"].add(best[1]["id"])
     unit["moved"] = unit["acted"] = True
 
 
@@ -1408,16 +1520,16 @@ def ai_spawn(game, utype, b):
     game["next_uid"] += 1
 
 
-def ai_build_weights(game, cfg, ctx, a_units, cred, threatened):
+def ai_build_weights(game, cfg, ctx, a_units, cred, threatened, producible):
     cnt = Counter(u["type"] for u in a_units)
     ek = Counter(e["type"] for e in ctx["known"])
-    air = ek["heli"] + ek["jet"]
-    armor = ek["mbt"] + ek["afv"] + ek["ifv"]
+    air = sum(1 for e in ctx["known"] if UNITS[e["type"]]["cls"] == "air")
+    armor = sum(1 for e in ctx["known"] if TARGET_CLASS[e["type"]] == "armor")
     w = {"inf": 1.0, "ifv": 1.3, "afv": 0.4 if cnt["afv"] >= 1 else 0.9, "mbt": 1.8,
          "mrl": 1.2 if (cnt["mrl"] < max(1, len(a_units) // 4) and game["turn"] > 2) else 0.1,
-         "sam": 0.0, "heli": 0.8 if cnt["mbt"] >= 2 else 0.2,
+         "sam": 0.2, "heli": 0.8,
          "ah": 1.6 if armor >= 2 else 0.4,
-         "jet": 0.5 if cred > 1500 else 0.0,
+         "jet": 2.4 if air >= 1 and cred > 1200 else 0.4,
          "eng": 0.8, "bl": 0.3,
          "at": 1.6 if armor >= 2 else 0.3,
          "mortar": 1.0 if game["turn"] > 3 else 0.2,
@@ -1430,27 +1542,36 @@ def ai_build_weights(game, cfg, ctx, a_units, cred, threatened):
          "ca": 0.8 if cred > 2000 else 0.0, "sub": 1.0, "ls": 0.0}
     if air:
         w["sam"] = 2.5 if cnt["sam"] <= air else 0.6
-        if cfg["counters"]:
-            w["jet"] = 2.2 if cnt["jet"] < air else 0.8
     if cfg["counters"]:
-        if armor >= 3:
-            w["heli"] *= 2.5
-            w["mrl"] *= 1.8
-            w["mbt"] *= 1.3
-        if ek["inf"] >= 4:
-            w["ifv"] *= 1.8
-            w["mrl"] *= 1.4
-        if ek["mrl"]:
-            w["afv"] *= 2.2
-            w["heli"] *= 1.5
-            w["jet"] *= 1.5
-    if ek["mrl"] >= 2:
-        w["heli"] *= 3.5                # gunships are the hard counter to rocket spam
-        w["jet"] = max(w["jet"] * 1.5, 3.0 if cred > 1200 else 0.0)
-        w["afv"] *= 1.5                 # fast recon raiding the batteries
-    if armor + ek["inf"] >= 6:
-        w["mrl"] *= 2.0                 # out-range the IFV wall
-        w["heli"] *= 2.0
+        candidates = [k for k in ORDER if k in producible and UNITS[k]["cost"] <= cred and w[k] > 0]
+        if candidates and ctx["known"]:
+            weighted_matchups = Counter()
+            total_priority = 0.0
+            for enemy in ctx["known"]:
+                enemy_type = enemy["type"]
+                enemy_def = UNITS[enemy_type]
+                enemy_hp = max(1, min(enemy.get("hp", enemy_def["hp"]), enemy_def["hp"]))
+                priority = enemy_def["cost"] / 500.0
+                own_coverage = sum(
+                    attack_base(ally["type"], enemy_type) * ally["hp"] / UNITS[ally["type"]]["hp"]
+                    / enemy_def["hp"]
+                    for ally in a_units
+                )
+                priority /= 1.0 + min(2.0, own_coverage)
+                best_damage = max(
+                    min(attack_base(k, enemy_type), enemy_hp) / enemy_def["hp"]
+                    for k in candidates
+                )
+                if best_damage <= 0:
+                    continue
+                total_priority += priority
+                for k in candidates:
+                    damage = min(attack_base(k, enemy_type), enemy_hp) / enemy_def["hp"]
+                    weighted_matchups[k] += priority * damage / best_damage
+            if total_priority:
+                for k in candidates:
+                    readiness = weighted_matchups[k] / total_priority
+                    w[k] = max(w[k] * 0.5, 2.5 * readiness)
     if threatened:
         w["inf"] *= 2.0
         w["ifv"] *= 1.5
@@ -1459,34 +1580,73 @@ def ai_build_weights(game, cfg, ctx, a_units, cred, threatened):
     return w
 
 
+def tech_gate(game, utype):
+    return PROD_SITES.get(utype, (None, 1))[1] <= 1 or game.get("tier", 2) >= 5
+
+
 def ai_produce(game, cfg, ctx):
-    hq = ctx["hq"]
     threatened = ctx["hq_threat"] is not None
     for _ in range(cfg["max_builds"]):
         a_units = [u for u in game["units"] if u["side"] == "A"]
         if len(a_units) >= UNIT_CAP:
             return
         prod = [b for b in game["buildings"] if b["side"] == "A"
-                and b["type"] in ("factory", "barracks", "airbase", "shipyard", "harbor")
+                and b["type"] in ("factory", "barracks", "airbase", "airfield", "shipyard", "harbor")
                 and unit_at(game, b["x"], b["y"]) is None]
+        if game.get("tier", 2) < 5:     # before airbases exist the HQ is the flight line
+            prod += [b for b in game["buildings"] if b["side"] == "A" and b["type"] == "HQ"
+                     and unit_at(game, b["x"], b["y"]) is None]
         if not prod:
             return
         cred = game["credits"]["A"]
         if cred < cfg["build_gate"]:
             return
-        w = ai_build_weights(game, cfg, ctx, a_units, cred, threatened)
         roster = TIERS[game.get("tier", 2)]["units"]
-        cands = [k for k in ORDER if UNITS[k]["cost"] <= cred and w[k] > 0 and k in roster]
+        production = {}
+        for k in ORDER:
+            sites = prod_sites(game, k)
+            tech = PROD_SITES.get(k, (None, 1))[1]
+            ok = [b for b in prod if b["type"] in sites
+                  and (1 if b["type"] == "HQ" else tech) <= b.get("level", 1)]
+            if k in roster and ok:
+                production[k] = ok
+        if not production:
+            return
+        w = ai_build_weights(game, cfg, ctx, a_units, cred, threatened, production)
+        fn = getattr(tier_mod(game), "ai_weights", None)
+        if fn:
+            ctx["own_air"] = sum(1 for u in a_units if UNITS[u["type"]]["cls"] == "air")
+            w = fn(w, ctx, game)
+        if income_of(game, "A") >= 650 or cred > 2600:   # a rich economy buys the heavy end
+            for k in ("ca", "sb", "ht", "how", "sub"):
+                if k in w:
+                    w[k] *= 1.6
+            if any(b.get("level", 1) >= 2 for b in game["buildings"] if b["side"] == "A"):
+                for k in ("ca", "sb"):
+                    if k in w:
+                        w[k] *= 1.5
+        cands = [k for k in ORDER if UNITS[k]["cost"] <= cred and w.get(k, 0) > 0 and k in production]
         if not cands:
             return
         if cfg["counters"]:
             pick = max(cands, key=lambda k: w[k] * (1 + 0.15 * random.random()))
         else:
             pick = random.choices(cands, weights=[w[k] for k in cands])[0]
-        sites, tech = PROD_SITES.get(pick, (("factory",), 1))
-        ok = [b for b in prod if b["type"] in sites and tech <= b.get("level", 1)]
-        if not ok:
-            return
+        mod = tier_mod(game)
+        fn = getattr(mod, "ai_opening", None)
+        opening = fn(TIERS[game.get("tier", 2)]["units"]) if fn else None
+        if opening:
+            built = game.get("ai_built", 0)
+            opening = [k for k in opening if k in production and tech_gate(game, k)
+                       and UNITS[k]["cost"] <= cred]
+            if built < len(opening):
+                pick = opening[built]
+                ok = production[pick]
+                game["ai_built"] = built + 1
+            else:
+                ok = production[pick]
+        else:
+            ok = production[pick]
         b = min(ok, key=lambda b: man(b["x"], b["y"], *ctx["ehq"]))
         takes = BUILD_TIMES.get(pick, 1)
         if takes > 1:
@@ -1500,7 +1660,7 @@ def ai_produce(game, cfg, ctx):
 
 def ai_found_upgrade(game, cfg, ctx):
     cred = game["credits"]["A"]
-    if cfg["upgrades"] and cred >= 1500:
+    if cfg["upgrades"] and cred >= 1200:
         cand = [b for b in game["buildings"] if b["side"] == "A"
                 and b["type"] in ("HQ", "factory", "airbase", "shipyard")
                 and b.get("level", 1) < MAX_B_LEVEL]
@@ -1530,10 +1690,354 @@ def ai_found_upgrade(game, cfg, ctx):
             return
 
 
+def tier_mod(game):
+    return globals()[f"tier{game.get('tier', 2)}"]
+
+
+def ai_doctrine_pick(tier, level, w, h):
+    """Medium and stronger AIs follow their tier's identity; weaker ones improvise."""
+    normalized_level = LEGACY_LEVELS.get(level) or level
+    if AI_LEVEL_ORDER.index(normalized_level) < AI_LEVEL_ORDER.index("medium"):
+        return random.choice(DOCTRINE_ORDER)
+    fn = getattr(globals()[f"tier{tier}"], "ai_doctrine", None)
+    d = fn(tier, level, w, h) if fn else None
+    return d or random.choice(DOCTRINE_ORDER)
+
+
+# ========================================================================
+# tutorials: fixed training scenarios (content lives in tutorials.py)
+# ========================================================================
+def tut_spawn(game, utype, side, x, y, tag=None):
+    nu = {"id": game["next_uid"], "type": utype, "side": side, "x": x, "y": y,
+          "hp": UNITS[utype]["hp"], "moved": False, "acted": False}
+    if tag:
+        nu["tag"] = tag
+    if air_rules(game) and UNITS[utype]["cls"] == "air":
+        nu["fuel"] = fuel_for(game, utype)
+    game["units"].append(nu)
+    game["next_uid"] += 1
+    return nu
+
+
+def tut_apply_scenario(game, tier):
+    sc = TUT.SCENARIOS[tier]
+    game["ter"] = list(sc["ter"])
+    game["w"], game["h"] = len(sc["ter"][0]), len(sc["ter"])
+    game["credits"] = {"P": sc["credits"], "A": sc["credits"]}
+    game["buildings"], game["units"], game["next_uid"] = [], [], 1
+    for n, (t, x, y, side) in enumerate(sc["blds"]):
+        b = {"type": t, "x": x, "y": y, "side": side, "level": 1, "id": 9000 + n}
+        b["hp"] = b["max_hp"] = BLD_HP.get(t, 30)
+        game["buildings"].append(b)
+    for t, side, x, y, tag in sc["units"]:
+        tut_spawn(game, t, side, x, y, tag)
+    game["p_known_b"] = {"P": {}, "A": {}}
+    game["p_seen"] = {"P": [], "A": []}
+    for b in game["buildings"]:
+        for s_ in ("P", "A"):
+            if b["side"] == s_:
+                game["p_known_b"][s_][f"{b['x']},{b['y']}"] = dict(b)
+    game["rank_applied"] = True        # training never touches ranks or the Hall of Fame
+    game["record_saved"] = True
+    game["log"] = {"P": [], "A": []}
+    glog(game, "system", "info", f"Training - Tier {tier}: {TUT.TUTORIALS[tier]['name']}. "
+                                 "Follow the objective banner; the opponent follows a fixed script.")
+
+
+_CLASS_WORDS = {"soft": "infantry and soft vehicles", "armor": "armor", "hard": "artillery and support vehicles",
+                "sea": "ships", "bld": "buildings", "rot": "helicopters and drones", "fix": "fixed-wing aircraft"}
+
+
+def tut_new_units(tier):
+    """Units that first appear in this tier (tier 1: its whole roster)."""
+    prev = set(TIERS[tier - 1]["units"]) if tier - 1 in TIERS else set()
+    return [k for k in ORDER if k in TIERS[tier]["units"] and k not in prev]
+
+
+def tut_guide_lesson(tier):
+    """Lesson 6 of every tutorial: a short field guide to the units introduced in this tier."""
+    roster = TIERS[tier]["units"]
+    news = tut_new_units(tier)
+    lines = ["A quick guide to this tier's new units."]
+    for k in news:
+        u, atk = UNITS[k], ATTACK[k]
+        best = [_CLASS_WORDS[c] for c, v in sorted(atk.items(), key=lambda kv: -kv[1]) if v >= 7][:2]
+        tclass = TARGET_CLASS.get(k)
+        if tclass is None:
+            hunters = []
+        else:
+            target_class = tclass
+            hunters = sorted((a for a in roster if a != k and ATTACK[a].get(target_class, 0) >= 6),
+                             key=lambda a: -ATTACK[a][target_class])[:2]
+        tail = []
+        if best:
+            tail.append("Best against " + " and ".join(best) + ".")
+        elif max(atk.values()) == 0:
+            tail.append("Unarmed - keep it safe.")
+        if hunters:
+            tail.append("Counter it with " + " or ".join(UNITS[a]["name"] for a in hunters) + ".")
+        lines.append(f"- **{u['name']}** ({u['cost']} cr) — {u['desc']} {' '.join(tail)}")
+    names = ", ".join(UNITS[k]["name"] for k in news)
+    return {"title": "Unit Field Guide", "learn": lines,
+            "task": f"Select each new unit and read its panel: {names}.",
+            "tip": "Build the counter to what the enemy fields, not more of what you already have.",
+            "check": {"k": "inspect_types", "types": news}, "marks": []}
+
+
+def tut_done_tiers(uid):
+    if not uid:
+        return set()
+    with closing(db()) as c:
+        return {r["tier"] for r in c.execute(
+            "SELECT tier FROM tutorial_progress WHERE user_id=?", (uid,))}
+
+
+def tut_mark_done(uid, tier):
+    if not uid:
+        return
+    with closing(db()) as c:
+        c.execute("INSERT OR IGNORE INTO tutorial_progress(user_id,tier,completed) VALUES(?,?,?)",
+                  (uid, tier, time.strftime("%Y-%m-%d %H:%M:%S")))
+        c.commit()
+
+
+def _act_match(a, s):
+    if a["ep"] != s["ep"]:
+        return False
+    if "utypes" in s and a.get("u") not in s["utypes"]:
+        return False
+    if "targets" in s and a.get("t") not in s["targets"]:
+        return False
+    if "kind" in s and a.get("kind") != s["kind"]:
+        return False
+    if "bld" in s and a.get("bld") not in s["bld"]:
+        return False
+    if "tags" in s and a.get("tag") not in s["tags"]:
+        return False
+    if "tiles" in s and a.get("tile") not in s["tiles"]:
+        return False
+    return not ("cls" in s and a.get("cls") != s["cls"])
+
+
+def tut_check(game, tut, s):
+    k = s["k"]
+    acts = tut["acts"][tut["act0"]:]
+    if k == "all":
+        return all(tut_check(game, tut, q) for q in s["of"])
+    if k == "any":
+        return any(tut_check(game, tut, q) for q in s["of"])
+    if k == "event":
+        return len(tut["ev"].get(s["name"], [])) >= s.get("n", 1)
+    if k == "act":
+        hit = [a for a in acts if _act_match(a, s)]
+        if "distinct" in s:
+            return len({a.get("u") for a in hit}) >= s["distinct"]
+        return len(hit) >= s.get("n", 1)
+    if k == "turn":
+        n = 0                                   # orders given so far, then any End Turn
+        for a in acts:
+            if a["ep"] == "end_turn":
+                if n >= s.get("orders", 0):
+                    return True
+            elif a["ep"] != "wait":
+                n += 1
+        return False
+    if k == "reach":                            # units standing on (or beside) the marked tiles
+        marks = TUT.TUTORIALS[tut["tier"]]["lessons"][tut["i"]].get("marks", [])
+        hit = sum(1 for mx, my in marks if any(u["side"] == "P" and man(u["x"], u["y"], mx, my) <= s.get("r", 1)
+                                               for u in game["units"]))
+        return hit >= s.get("n", 1)
+    if k == "inspect_types":
+        return set(s["types"]) <= set(tut["ev"].get("types", []))
+    if k == "near_hq":
+        hq = next((b for b in game["buildings"] if b["type"] == "HQ" and b["side"] == "A"), None)
+        return bool(hq) and any(u["side"] == "P" and man(u["x"], u["y"], hq["x"], hq["y"]) <= s["d"]
+                                for u in game["units"])
+    if k == "capture":
+        b = building_at(game, s["x"], s["y"])
+        return bool(b) and b["side"] == "P"
+    if k == "sonar":
+        return any(d["side"] == "P" and d["type"] == "dd" and q["side"] == "A" and q["type"] == "sub"
+                   and man(d["x"], d["y"], q["x"], q["y"]) <= tier6.SONAR_RANGE
+                   for d in game["units"] for q in game["units"])
+    if k == "owns":
+        return any(u["side"] == "P" and u["type"] in s["types"] for u in game["units"]) or \
+            any(q["side"] == "P" and q["utype"] in s["types"] for q in game["prod"])
+    return False
+
+
+def tut_next_lesson(game, tut, forced=False):
+    tut["i"] += 1
+    tut["act0"] = len(tut["acts"])
+    tut["ev"] = {}
+    tut["armed"] = False                # the next lesson counts only after the player has read it
+    if tut["i"] >= len(TUT.TUTORIALS[tut["tier"]]["lessons"]):
+        tut["stage"] = "final"          # nothing left to teach: the opponent now plays itself
+
+
+def advance_tutorial(game):
+    """Walk the tutorial's lessons as the player completes each one; handle victory."""
+    tut = game.get("tutorial")
+    if not tut:
+        return
+    res = game.get("result")
+    if res:
+        if tut["stage"] not in ("complete", "failed"):
+            if res["winner"] == "P":
+                tut["stage"] = "complete"
+                tut_mark_done((game.get("seats") or {}).get("P"), tut["tier"])
+            else:
+                tut["stage"] = "failed"
+        return
+    lessons = TUT.TUTORIALS[tut["tier"]]["lessons"]
+    while tut["stage"] == "lessons" and tut["i"] < len(lessons) and tut.get("armed"):
+        if not tut_check(game, tut, lessons[tut["i"]]["check"]):
+            break
+        tut_next_lesson(game, tut)
+
+
+TUT_TRACKED = {"/api/move": "move", "/api/attack": "attack", "/api/build": "build",
+               "/api/construct": "construct", "/api/load": "load", "/api/unload": "unload",
+               "/api/demolish_bridge": "demolish_bridge", "/api/battery_fire": "battery_fire",
+               "/api/upgrade": "upgrade", "/api/end_turn": "end_turn", "/api/wait": "wait"}
+
+
+@app.before_request
+def tut_before():
+    """Remember who acted on what *before* the action resolves (targets may die)."""
+    g.tpre = None
+    ep = TUT_TRACKED.get(request.path)
+    if not ep or request.method != "POST":
+        return
+    game = GAMES.get(session.get("gid"))
+    if not game or not game.get("tutorial"):
+        return
+    d = request.get_json(force=True, silent=True) or {}
+    rec = {"ep": ep, "turn": game["turn"]}
+    u = get_unit(game, d.get("attacker") if ep == "attack" else d.get("unit"))
+    if u:
+        rec["u"], rec["cls"] = u["type"], UNITS[u["type"]]["cls"]
+    if ep == "attack":
+        t = get_unit(game, d.get("target"))
+        if t:
+            rec["t"], rec["tag"] = t["type"], t.get("tag")
+        else:
+            bl = next((b for b in game["buildings"] if b.get("id") == d.get("target")), None)
+            if bl:
+                rec["t"] = bl["type"]
+    elif ep == "build":
+        rec["u"] = d.get("type")
+        if rec["u"] in UNITS:
+            rec["cls"] = UNITS[rec["u"]]["cls"]
+    elif ep == "construct":
+        rec["kind"] = d.get("kind")
+    elif ep == "move":
+        try:
+            mx, my = int(d.get("x", -1)), int(d.get("y", -1))
+            rec["tile"] = game["ter"][my][mx]
+            bl = building_at(game, mx, my)
+            if bl and bl["side"] == "P":
+                rec["bld"] = bl["type"]
+        except (ValueError, TypeError, IndexError):
+            pass
+    g.tpre = rec
+
+
+@app.after_request
+def tut_after(resp):
+    rec = getattr(g, "tpre", None)
+    if not rec or resp.status_code != 200:
+        return resp
+    try:
+        body = resp.get_json(silent=True) or {}
+        if not body.get("ok"):
+            return resp
+        with LOCK:
+            game = GAMES.get(session.get("gid"))
+            tut = game.get("tutorial") if game else None
+            if not tut:
+                return resp
+            tut["acts"].append(rec)
+            del tut["acts"][:-300]
+            tut["act0"] = min(tut["act0"], len(tut["acts"]))
+            tut["acts_n"] = tut.get("acts_n", 0) + 1
+            advance_tutorial(game)
+            key = "final" if "final" in body else "state"
+            if key in body:
+                body[key] = public_state(game)
+                resp.set_data(json.dumps(body))
+    except Exception:                                  # tracking must never break a move
+        app.logger.exception("tutorial tracking failed")
+    return resp
+
+
+def tutorial_turn(game):
+    """The scripted training opponent: same moves, every game. It never improvises."""
+    events = []
+    tut = game["tutorial"]
+    sc = TUT.SCENARIOS[tut["tier"]]
+    for step in sc["script"]:
+        tag = step["tag"]
+        u = next((q for q in game["units"] if q["side"] == "A" and q.get("tag") == tag), None)
+        if u is None:                                   # training dummies are replaced when destroyed
+            rx, ry = step["respawn"]
+            if not any(q["x"] == rx and q["y"] == ry for q in game["units"]):
+                tut_spawn(game, step["utype"], "A", rx, ry, tag)
+            continue
+        path = step["path"]
+        if len(path) < 2:
+            continue
+        i = tut["pat"].get(tag, 0) % len(path)
+        nx, ny = path[(i + 1) % len(path)]
+        tut["pat"][tag] = (i + 1) % len(path)
+        if any(q["x"] == nx and q["y"] == ny for q in game["units"]):
+            continue
+        fx, fy = u["x"], u["y"]
+        pv = vision(game, "P")
+        u["x"], u["y"] = nx, ny
+        ux, uy = u["x"], u["y"]
+        entries = glog(game, "move", "info",
+                       lambda S, u=u, ux=ux, uy=uy: f"{uname(u, S)} moved to {label(ux, uy)}.",
+                       ux, uy, aud="A")
+        from_vis, to_vis = (fx, fy) in pv, (nx, ny) in pv
+        if from_vis or to_vis:
+            ev = {"t": "move", "u": snap(u), "from": [fx, fy], "to": [nx, ny],
+                  "from_vis": from_vis, "to_vis": to_vis, "log": entries.get("P", [])}
+            events.append(redact_move_event(game, ev, pv, (fx, fy), (nx, ny)))
+    for u in game["units"]:
+        if u["side"] == "A":
+            u["moved"] = u["acted"] = True
+    return events
+
+
+def tutorial_payload(game):
+    tut = game.get("tutorial")
+    if not tut:
+        return None
+    T = TUT.TUTORIALS[tut["tier"]]
+    out = {"tier": tut["tier"], "name": T["name"], "stage": tut["stage"], "replay": tut["replay"],
+           "index": tut["i"], "total": len(T["lessons"]), "armed": bool(tut.get("armed")), "key": f"{game['id']}:{tut['stage']}:{tut['i']}"}
+    if tut["stage"] == "lessons":
+        L = T["lessons"][tut["i"]]
+        out["lesson"] = {k: L[k] for k in ("title", "learn", "task", "tip")}
+        out["ui"] = L.get("ui")
+        out["marks"] = L.get("marks", [])
+        out["briefing"] = T["briefing"] if tut["i"] == 0 else None
+    elif tut["stage"] == "final":
+        out["final"] = T["final"]
+    elif tut["stage"] == "complete":
+        out["complete"] = T["complete"]
+        out["next"] = tut["tier"] + 1 if tut["tier"] + 1 in TUT.TUTORIALS else None
+        out["reference"] = T["reference"]["title"]
+    return out
+
+
 def ai_turn(game):
     events = []
     cfg = ai_cfg(game)
     begin_turn(game, "A", [])
+    if game.get("tutorial") and game["tutorial"]["stage"] == "lessons":
+        return tutorial_turn(game)
     ai_update_memory(game, cfg)
     ctx = ai_build_ctx(game, cfg)
     ai_found_upgrade(game, cfg, ctx)
@@ -1667,6 +2171,9 @@ def init_db():
             pw_hash TEXT NOT NULL, rank INTEGER NOT NULL DEFAULT 0,
             wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0,
             created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS tutorial_progress(
+            user_id INTEGER NOT NULL, tier INTEGER NOT NULL, completed TEXT NOT NULL,
+            PRIMARY KEY(user_id, tier));
         CREATE TABLE IF NOT EXISTS saves(
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
             kind TEXT NOT NULL DEFAULT 'manual', created TEXT NOT NULL,
@@ -1704,18 +2211,6 @@ def init_db():
                   "WHEN 'easy' THEN 'very easy' WHEN 'normal' THEN 'easy' "
                   "WHEN 'extreme' THEN 'very hard' WHEN 'brutal' THEN 'extreme' "
                   "WHEN 'merciless' THEN 'relentless' ELSE level END")
-        empty = c.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
-        if empty and os.path.exists(LEGACY_RECORDS):
-            try:
-                with open(LEGACY_RECORDS, "r", encoding="utf-8") as f:
-                    for r in json.load(f):
-                        c.execute("INSERT INTO records(name,turns,units_left,kills,level,date) "
-                                  "VALUES(?,?,?,?,?,?)",
-                                  (str(r.get("name", "Anon"))[:12], int(r.get("turns", 99)),
-                                   int(r.get("units_left", 0)), 0,
-                                   str(r.get("level", "normal")), str(r.get("date", ""))))
-            except (OSError, ValueError, TypeError):
-                pass
         c.commit()
 
 
@@ -1723,7 +2218,8 @@ init_db()
 
 
 def save_game(game, name, kind="manual"):
-    data = json.dumps(game)
+    game.pop("strategy", None)        # legacy: modules are not serialisable
+    data = json.dumps(game, default=lambda o: None)
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     nunits = sum(1 for u in game["units"] if u["side"] == "P")
     uid = session.get("uid")
@@ -1732,7 +2228,8 @@ def save_game(game, name, kind="manual"):
             c.execute("DELETE FROM saves WHERE kind='auto' AND (user_id=? OR user_id IS NULL)", (uid,))
         else:
             c.execute("DELETE FROM saves WHERE kind='manual' AND (user_id=? OR user_id IS NULL) AND id NOT IN "
-                      "(SELECT id FROM saves WHERE kind='manual' ORDER BY id DESC LIMIT 29)")
+                      "(SELECT id FROM saves WHERE kind='manual' AND (user_id=? OR user_id IS NULL) "
+                      "ORDER BY id DESC LIMIT 29)", (uid, uid))   # keep this player's 30 newest
         cur = c.execute("INSERT INTO saves(name,kind,created,turn,level,credits,units,data,user_id) "
                         "VALUES(?,?,?,?,?,?,?,?,?)",
                         (name, kind, now, game["turn"], game["ai_level"],
@@ -1763,6 +2260,40 @@ def touch(uid):
         LAST_SEEN[uid] = time.time()
 
 
+ABANDON_SECONDS = 300
+EXPIRE_SECONDS = 300
+
+
+def touch_game(game):
+    game["last_move"] = time.time()
+
+
+def prune_games():
+    """Drop any game that saw no move for 5+ minutes (memory hygiene)."""
+    now = time.time()
+    for gid, game_state in list(GAMES.items()):
+        if game_state.get("tutorial") and game_state["tutorial"].get("stage") in ("lessons", "final"):
+            continue                       # people read training text; keep it alive
+        if now - game_state.get("last_move", game_state.get("created_ts", now)) > EXPIRE_SECONDS:
+            del GAMES[gid]
+
+
+def check_abandons():
+    """A PvP player idle for 5+ minutes forfeits the battle (and rating)."""
+    now = time.time()
+    for game_state in list(GAMES.values()):
+        if game_state.get("mode") != "pvp" or game_state.get("result"):
+            continue
+        for side in ("P", "A"):
+            uid = (game_state.get("seats") or {}).get(side)
+            if uid and now - LAST_SEEN.get(uid, 0) > ABANDON_SECONDS:
+                game_state["result"] = {"winner": enemy_of(side), "reason": "abandon"}
+                glog(game_state, "system", "bad" if side == "P" else "good",
+                     "Opponent abandoned the battle - victory by forfeit.")
+                finalize_result(game_state)
+                break
+
+
 def login_required(fn):
     @wraps(fn)
     def wrapper(*a, **kw):
@@ -1786,6 +2317,7 @@ def api_battery_fire():
         side, e = my_turn_or_fail(game)
         if e:
             return e
+        pv = vision(game, side)
         d = request.get_json(force=True, silent=True) or {}
         try:
             b = building_at(game, int(d.get("x", -1)), int(d.get("y", -1)))
@@ -1806,6 +2338,7 @@ def api_battery_fire():
         eff = min(dmg, tgt["hp"])
         tgt["hp"] -= eff
         killed = tgt["hp"] <= 0
+        p_log = []
         b["fired"] = game["turn"]
         st = game["stats"]
         if side == "P":
@@ -1816,15 +2349,14 @@ def api_battery_fire():
             st["losses"] += int(killed)
         if killed:
             game["units"] = [u for u in game["units"] if u["id"] != tgt["id"]]
-        pv = vision(game, "P")
-        p_log = []
-        if tgt["side"] == "P" or (tgt["x"], tgt["y"]) in pv:
+            p_log = []
+        if tgt["side"] == side or (tgt["x"], tgt["y"]) in pv:
             entries = glog(game, "combat", "good" if side == "P" else "bad",
                            f"☗ {bname(b)} at {label(b['x'], b['y'])} fired at "
                            f"{uname(tgt, side)} ({label(tgt['x'], tgt['y'])}): -{eff} HP"
                            + (" — destroyed!" if killed else "."),
                            tgt["x"], tgt["y"])
-            p_log = entries.get("P", [])
+            p_log = entries.get(side, [])
         events = [{"t": "bldhit", "x": tgt["x"], "y": tgt["y"], "dmg": eff, "dk": killed,
                    "log": p_log}]
         check_annihilation(game)
@@ -2013,6 +2545,7 @@ def api_logout():
 @app.route("/api/lobby")
 @login_required
 def api_lobby():
+    check_abandons()
     now = time.time()
     me = session["uid"]
     with closing(db()) as c:
@@ -2064,7 +2597,7 @@ def api_pvp_create():
         if pdoc not in DOCTRINES:
             pdoc = "territ"
         game = new_game(mode="pvp", opponent=opp, tier=d.get("tier", 2),
-                        doctrines={"P": pdoc, "A": "territ"})
+                        map_idx=d.get("map", 0), doctrines={"P": pdoc, "A": "territ"})
         GAMES[game["id"]] = game
         session["gid"] = game["id"]
         if opp:
@@ -2201,7 +2734,7 @@ def api_unload():
         au = {"id": game["next_uid"], "type": c["type"], "side": side, "x": x, "y": y,
               "hp": c["hp"], "moved": True, "acted": True}
         if air_rules(game) and UNITS[c["type"]]["cls"] == "air":
-            au["fuel"] = fuel_for(game, utype)
+            au["fuel"] = fuel_for(game, c["type"])
         game["units"].append(au)
         game["next_uid"] += 1
         u["moved"] = True          # the ship stays put, but keeps unloading its cargo
@@ -2236,10 +2769,9 @@ def api_construct():
             return fail("unit already acted")
         if kind not in CONSTRUCT:
             return fail("unknown project")
-        who = UNITS[u["type"]]
         if kind == "bridge":
-            if u["type"] != "bl":
-                return fail("only bridgelayers build bridges")
+            if u["type"] not in ("bl", "eng"):
+                return fail("only engineers and bridgelayers build bridges")
             try:
                 x, y = int(d.get("x", -1)), int(d.get("y", -1))
             except (TypeError, ValueError):
@@ -2383,7 +2915,14 @@ def api_meta():
 @app.route("/api/state")
 @login_required
 def api_state():
+    check_abandons()
     with LOCK:
+        wanted = session.get("gid")
+        game = GAMES.get(wanted) if wanted else None
+        if wanted and game is None:
+            session.pop("gid", None)
+            return jsonify({"ok": True, "state": None,
+                            "note": "No battle found - operations expire after 5 minutes of inactivity."})
         game = current_game(create=True)
         return jsonify({"ok": True, "state": public_state(game)})
 
@@ -2396,12 +2935,128 @@ def api_new():
         pdoc = d.get("doctrine", "territ")
         if pdoc not in DOCTRINES:
             pdoc = "territ"
-        game = new_game(d.get("level", "normal"), map_idx=d.get("map", 0), tier=d.get("tier", 2),
-                        doctrines={"P": pdoc, "A": random.choice(DOCTRINE_ORDER)})
+        game_tier = int(d.get("tier", 2)) if str(d.get("tier", 2)).isdigit() else 2
+        adoc = ai_doctrine_pick(game_tier, d.get("level", "normal"), W, H)
+        game = new_game(d.get("level", "normal"), map_idx=d.get("map", 0), tier=game_tier,
+                        doctrines={"P": pdoc, "A": adoc})
         GAMES[game["id"]] = game
         session["gid"] = game["id"]
         session["level"] = game["ai_level"]
         return jsonify({"ok": True, "state": public_state(game)})
+
+
+# ---------------- tutorials ----------------
+def tut_catalogue(uid):
+    done = tut_done_tiers(uid)
+    out = []
+    for t in sorted(TUT.TUTORIALS):
+        T = TUT.TUTORIALS[t]
+        unlocked = t == 1 or (t - 1) in done
+        out.append({"tier": t, "name": T["name"], "done": t in done, "unlocked": unlocked,
+                    "lessons": [L["title"] for L in T["lessons"]] + [T["final"]["title"]],
+                    "reference": ({"title": T["reference"]["title"], "points": T["reference"]["points"]}
+                                  if t in done else None)})
+    return out
+
+
+@app.route("/api/tutorials")
+@login_required
+def api_tutorials():
+    return jsonify({"ok": True, "tutorials": tut_catalogue(session["uid"])})
+
+
+@app.route("/api/tutorial/start", methods=["POST"])
+@login_required
+def api_tutorial_start():
+    with LOCK:
+        d = request.get_json(force=True, silent=True) or {}
+        try:
+            tier = int(d.get("tier", 1))
+        except (TypeError, ValueError):
+            return fail("bad tier")
+        if tier not in TUT.TUTORIALS:
+            return fail("no such tutorial")
+        done = tut_done_tiers(session["uid"])
+        if tier != 1 and (tier - 1) not in done:
+            return fail(f"Complete the Tier {tier - 1} tutorial first.")
+        game = new_game("beginner", map_idx=0, tier=tier, doctrines={"P": "territ", "A": "territ"})
+        game["tutorial"] = {"tier": tier, "stage": "lessons", "i": 0, "acts": [], "act0": 0, "ev": {},
+                            "pat": {}, "done": [], "replay": tier in done, "armed": False}
+        tut_apply_scenario(game, tier)
+        GAMES[game["id"]] = game
+        session["gid"] = game["id"]
+        session["level"] = game["ai_level"]
+        return jsonify({"ok": True, "state": public_state(game)})
+
+
+def _tut_game():
+    game = current_game()
+    if game is None or not game.get("tutorial") or game.get("result"):
+        return None
+    return game
+
+
+@app.route("/api/tutorial/event", methods=["POST"])
+@login_required
+def api_tutorial_event():
+    with LOCK:
+        game = _tut_game()
+        if game is None:
+            return jsonify({"ok": True, "state": None})
+        d = request.get_json(force=True, silent=True) or {}
+        name = d.get("name")
+        if name in ("inspect_own", "inspect_enemy") and game["tutorial"].get("armed"):
+            ids = game["tutorial"]["ev"].setdefault(name, [])
+            if str(d.get("id")) not in ids:
+                ids.append(str(d.get("id")))
+            q = get_unit(game, d.get("id"))
+            tys = game["tutorial"]["ev"].setdefault("types", [])
+            if q and q["type"] not in tys:
+                tys.append(q["type"])
+        return jsonify({"ok": True, "state": public_state(game)})
+
+
+@app.route("/api/tutorial/doctrine", methods=["POST"])
+@login_required
+def api_tutorial_doctrine():
+    with LOCK:
+        game = _tut_game()
+        d = request.get_json(force=True, silent=True) or {}
+        if game is None or game["tutorial"]["stage"] != "lessons" or d.get("doctrine") not in DOCTRINES \
+                or not game["tutorial"].get("armed"):
+            return fail("no doctrine to choose right now")
+        game["doctrine"]["P"] = d["doctrine"]
+        game["tutorial"]["ev"].setdefault("doctrine", []).append(d["doctrine"])
+        glog(game, "system", "info", f"Doctrine chosen: {DOCTRINES[d['doctrine']]['name']}.")
+        return jsonify({"ok": True, "state": public_state(game)})
+
+
+@app.route("/api/tutorial/ack", methods=["POST"])
+@login_required
+def api_tutorial_ack():
+    """The player has read the lesson: only now do their orders count towards it."""
+    with LOCK:
+        game = _tut_game()
+        if game is None:
+            return jsonify({"ok": True, "state": None})
+        tut = game["tutorial"]
+        if not tut.get("armed"):
+            tut["armed"] = True
+            tut["act0"] = len(tut["acts"])
+            tut["ev"] = {}
+        return jsonify({"ok": True, "state": public_state(game)})
+
+
+@app.route("/api/tutorial/skip", methods=["POST"])
+@login_required
+def api_tutorial_skip():
+    with LOCK:
+        game = _tut_game()
+        if game is None or game["tutorial"]["stage"] != "lessons":
+            return fail("nothing to skip")
+        tut_next_lesson(game, game["tutorial"], forced=True)
+        return jsonify({"ok": True, "state": public_state(game)})
+
 
 
 @app.route("/api/ranges", methods=["POST"])
@@ -2476,7 +3131,8 @@ def api_move():
                 return fail("not enough fuel — land at a friendly airfield or HQ to refuel")
             u["fuel"] = u.get("fuel", fuel_for(game, u["type"])) - need
         start = (u["x"], u["y"])
-        final, amb = walk(game, u, path_to(par, start, (x, y)))
+        route = path_to(par, start, (x, y))
+        final, amb = walk(game, u, route)
         events = []
         if final == start and amb is not None:
             entries = glog(game, "contact", "bad",
@@ -2495,7 +3151,9 @@ def api_move():
                     return f"{uname(u, S)} moved {label(*start)} → {label(*final)}."
                 return f"◉ Contact: {uname(u, S)} spotted at {label(*final)}."
             entries = glog(game, "move", "info", mvtxt, final[0], final[1])
+            travelled = route[:route.index(final) + 1] if final in route else [start, final]
             events.append({"t": "move", "u": snap(u), "from": list(start), "to": list(final),
+                           "path": [list(p) for p in travelled],
                            "from_vis": True, "to_vis": True, "log": entries.get("P", [])})
         if amb is not None:
             e1 = glog(game, "contact", "bad",
@@ -2526,7 +3184,6 @@ def resolve_building_attack(game, att, bl, events):
         st["dealt"] += eff
     else:
         st["taken"] += eff
-    pv = vision(game, "P")
     entries = glog(game, "combat", "good" if att["side"] == "P" else "bad",
                    f"{uname(att, 'P' if att['side'] == 'P' else 'A')} ({label(att['x'], att['y'])}) "
                    f"shelled the {bname(bl)} at {label(bl['x'], bl['y'])}: -{eff} HP",
@@ -2588,7 +3245,7 @@ def api_wait():
         game = active_game()
         if game is None:
             return fail("no active game")
-        side, e = my_turn_or_fail(game)
+        _side, e = my_turn_or_fail(game)
         if e:
             return e
         u = player_unit(game, (request.get_json(force=True, silent=True) or {}).get("unit"))
@@ -2615,15 +3272,20 @@ def api_build():
             return fail("bad tile")
         utype = d.get("type")
         b = building_at(game, x, y)
-        if b is None or b["side"] != side or b["type"] not in ("factory", "barracks",
-                                                               "airbase", "shipyard", "harbor"):
+        if b is None or b["side"] != side or (b["type"] not in ("factory", "barracks",
+                                                                "airbase", "shipyard", "harbor")
+                                             and not (b["type"] == "HQ" and utype in UNITS
+                                                      and "HQ" in prod_sites(game, utype))):
             return fail("cannot build here")
         # the pad may be occupied: the order waits for it to clear
         if utype not in UNITS:
             return fail("unknown unit")
         if utype not in TIERS[game.get("tier", 2)]["units"]:
             return fail(f"{UNITS[utype]['name']} is not available in tier {game.get('tier', 2)}")
-        sites, tech = PROD_SITES.get(utype, (("factory",), 1))
+        sites = prod_sites(game, utype)
+        tech = PROD_SITES.get(utype, (None, 1))[1]
+        if b["type"] == "HQ":
+            tech = 1                      # the HQ flight line needs no upgrade
         if b["type"] not in sites:
             return fail(f"{UNITS[utype]['name']} is built at {' or '.join(sites)}, "
                         f"not at a {bname(b)}")
@@ -2674,6 +3336,14 @@ def api_build():
 
 
 BLD_REPAIR_PER_HP = 5
+
+
+def prod_sites(game, utype):
+    """Aircraft: before tier 5 there are no airbases, so the HQ builds them; from tier 5 only
+    airbases (and airfields) do."""
+    if UNITS[utype]["cls"] == "air" and game.get("tier", 2) < 5:
+        return ("HQ",)
+    return PROD_SITES.get(utype, (("factory",), 1))[0]
 
 
 @app.route("/api/repair_bld", methods=["POST"])
@@ -2909,6 +3579,11 @@ def api_add_record():
             return fail("this victory is already recorded")
         auto_record(game)
         return jsonify({"ok": True, "records": load_records()})
+
+
+for _t, _T in TUT.TUTORIALS.items():
+    if not any(L["title"] == "Unit Field Guide" for L in _T["lessons"]):
+        _T["lessons"].append(tut_guide_lesson(_t))
 
 
 if __name__ == "__main__":

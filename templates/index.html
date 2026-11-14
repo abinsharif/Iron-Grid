@@ -39,12 +39,22 @@
       <div class="zoombar" id="zoombar">
         <button id="zoom-out" class="btn-ig sm" title="Zoom out"><i class="bi bi-zoom-out"></i></button>
         <button id="zoom-in" class="btn-ig sm" title="Zoom in"><i class="bi bi-zoom-in"></i></button>
+        <button id="zoom-strategic" class="btn-ig sm zoom-preset" aria-pressed="false" title="Fit the whole battlefield with room to spare">Strategic</button>
+        <button id="zoom-standard" class="btn-ig sm zoom-preset" aria-pressed="true" title="Balanced battlefield view">Standard</button>
+        <button id="zoom-tactical" class="btn-ig sm zoom-preset" aria-pressed="false" title="Zoom in for a close tactical view">Tactical</button>
         <button id="zoom-fit" class="btn-ig sm" title="Fit to screen"><i class="bi bi-aspect-ratio"></i> Fit</button>
         <button id="zoom-reset" class="btn-ig sm" title="Actual size"><i class="bi bi-fullscreen"></i> 1:1</button>
-        <span class="muted" style="font-size:.78rem">wheel = zoom · drag = pan</span>
+        <button id="panel-toggle" class="btn-ig sm" aria-expanded="true" title="Collapse battle information panel"><i class="bi bi-layout-sidebar"></i> Panels</button>
+        <span class="muted zoom-hint">wheel = zoom · drag = pan · double-click = centre</span>
       </div>
-      <div class="board-wrap" id="board-scroll">
-        <canvas id="board" width="638" height="462" tabindex="0" aria-label="Tactical battlefield. Use arrow keys to move and Enter to select."></canvas>
+      <div class="board-stage">
+        <div class="board-wrap" id="board-scroll">
+          <canvas id="board" width="638" height="462" tabindex="0" aria-label="Tactical battlefield. Use arrow keys to move and Enter to select."></canvas>
+        </div>
+        <section id="minimap-panel" class="minimap-panel" aria-label="Battlefield minimap">
+          <div class="minimap-head"><b>THEATER</b><button id="minimap-collapse" type="button" aria-label="Collapse minimap" title="Collapse minimap">−</button></div>
+          <canvas id="minimap" width="220" height="150" tabindex="0" aria-label="Interactive minimap. Click or drag to navigate."></canvas>
+        </section>
         <div id="end-overlay" class="overlay hidden">
           <div class="panel center">
             <h2 id="end-title">VICTORY</h2>
@@ -114,6 +124,12 @@
     </aside>
   </main>
 
+  <div id="modal-tut" class="overlay fixed hidden">
+    <section class="panel modal-p wide">
+      <div id="tut-body" class="tut-body"></div>
+      <div id="tut-actions" class="row-gap" style="justify-content:flex-end;margin-top:12px"></div>
+    </section>
+  </div>
   <div id="modal-new" class="overlay fixed hidden">
     <section class="panel modal-p">
       <h2>New operation</h2>
@@ -130,10 +146,10 @@
     </section>
   </div>
   <div id="modal-settings" class="overlay fixed hidden">
-    <section class="panel modal-p">
-      <h2>Settings</h2>
+    <section class="panel modal-p wide">
+      <div class="modal-head"><h2>Settings</h2><button id="settings-close-x" class="btn-ig sm" aria-label="Close settings" title="Close (Esc)">✕ Close</button></div>
       <div id="settings-body" class="settings"></div>
-      <button id="settings-close" class="btn-ig">Close</button>
+      <div class="modal-foot"><button id="settings-close" class="btn-ig primary">Done</button></div>
     </section>
   </div>
   <div id="modal-saves" class="overlay fixed hidden">
@@ -155,6 +171,10 @@
     </section>
   </div>
 
+  <script src="{{ url_for('static', filename='js/gfx/anim-manager.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/gfx/fog-safe.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/gfx/renderer-api.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/gfx/classic.js') }}"></script>
   <script src="{{ url_for('static', filename='js/game.js') }}"></script>
 </body>
 </html>

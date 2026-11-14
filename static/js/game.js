@@ -1,7 +1,6 @@
 /* IRON GRID V4 client. All rules live on the server; this file renders and sends intents. */
 (() => {
   "use strict";
-  const TILE = 44, LAB = 22;
   let META = null, W = 14, H = 10, TERRAIN = [];
   const $ = id => document.getElementById(id);
   const key = (x, y) => x + "," + y;
@@ -14,19 +13,32 @@
                          kill: "Kills & losses", capture: "Captures", turn: "Turn notification",
                          msg: "New chat message", contact: "Contacts & ambushes",
                          heal: "Repairs", err: "Errors", build: "Production & construction" };
-  const DEFAULTS = { theme: "dark", keyboard: true, cvd: false, bigtext: false, animspeed: 57,
+  const DEFAULTS = { theme: "dark", keyboard: true, cvd: false, bigtext: false, animpct: 100, display: "classic",
                      sound: false, volume: 0.8,
                      snd: Object.fromEntries(Object.keys(SND_CHANNELS).map(k => [k, true])),
                      sndvol: Object.fromEntries(Object.keys(SND_CHANNELS).map(k => [k, 1])),
                      zoombar: true, readycounter: true, hoverfx: true,
-                     autosave: true, confirmEnd: true, level: "normal" };
+                     autosave: true, confirmEnd: true, level: "normal",
+                     adaptiveView: true, autoTile: true, cameraPreset: "standard", manualZoom: 1,
+                     minimap: true, minimapCollapsed: false, lod: true, zoomToCursor: true,
+                     smoothPan: true, doubleClickCenter: true, autoCenter: false, keepCursorVisible: true,
+                     sideCollapsed: false };
   let settings = Object.assign({}, DEFAULTS);
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SKEY) || "{}")); } catch (e) {}
   settings.snd = Object.assign({}, DEFAULTS.snd, settings.snd || {});
   settings.sndvol = Object.assign({}, DEFAULTS.sndvol, settings.sndvol || {});
-  if (settings.anim !== undefined && settings.animspeed === undefined)
-    settings.animspeed = settings.anim === "off" ? 0 : settings.anim === "fast" ? 85 : 57;
-  delete settings.anim;
+  if (!["strategic", "standard", "tactical", "manual"].includes(settings.cameraPreset))
+    settings.cameraPreset = DEFAULTS.cameraPreset;
+  settings.manualZoom = typeof settings.manualZoom === "number" && Number.isFinite(settings.manualZoom)
+    ? Math.max(GFX.CAMERA.ZOOM_MIN, Math.min(GFX.CAMERA.ZOOM_MAX, settings.manualZoom))
+    : DEFAULTS.manualZoom;
+  if (settings.animpct === undefined || typeof settings.animpct !== "number") {     // legacy 0-100 slider / old on-off
+    const legacy = settings.animspeed !== undefined ? settings.animspeed
+      : settings.anim === "off" ? 0 : settings.anim === "fast" ? 85 : undefined;
+    settings.animpct = GFX.AnimManager.fromLegacy(legacy);
+  }
+  delete settings.anim; delete settings.animspeed;
+  GFX.anim.setPercent(settings.animpct);
   function saveSettings() { try { localStorage.setItem(SKEY, JSON.stringify(settings)); } catch (e) {} }
   function applySettings() {
     let t = settings.theme;
@@ -35,13 +47,23 @@
     r.dataset.theme = t; r.dataset.bsTheme = t;
     if (settings.cvd) r.dataset.cvd = "1"; else delete r.dataset.cvd;
     r.classList.toggle("bigtext", !!settings.bigtext);
+    GFX.anim.setPercent(settings.animpct);
+    if (typeof gfx !== "undefined" && gfx.current) {
+      gfx.current.setPrefs(gfxPrefs()); gfx.markDirty();
+    }
+    updateLayout();
+    $("zoombar").classList.toggle("hidden", !settings.zoombar);
+    $("minimap-panel").classList.toggle("hidden", !settings.minimap);
+    $("minimap-panel").classList.toggle("collapsed", !!settings.minimapCollapsed);
+    $("minimap-collapse").textContent = settings.minimapCollapsed ? "+" : "−";
+    $("minimap-collapse").setAttribute("aria-label", settings.minimapCollapsed ? "Expand minimap" : "Collapse minimap");
+    updatePresetButtons();
     $("kbd-hint").textContent = settings.keyboard
       ? "Keyboard on — arrows move the cursor · Enter select/confirm · Tab next unit · T next target · E end turn · ? help"
       : "Keyboard control is off (Settings → Keyboard control).";
   }
-  const speed = ms => settings.animspeed <= 0 ? 0
-    : ms * (1.8 - (settings.animspeed / 100) * 1.6);   // animation-speed slider
-  const sleep = ms => (speed(ms) ? sleepRaw(speed(ms)) : Promise.resolve());
+  const speed = ms => GFX.anim.dur(ms);               // one shared animation clock (0% = off)
+  const sleep = ms => GFX.anim.sleep(ms);
 
   // ---------------------------------------------------------------- audio (optional)
   let actx = null;
@@ -80,36 +102,21 @@
   let selB = null;           // selected building (for build menu)
   let busy = false, hover = null, cursor = { x: 2, y: 8 };
   let floats = [], anim = null, flash = null, logFilter = "all";
-  let g = null;              // active 2d context (screen or export)
-  const canvas = $("board"), screenCtx = canvas.getContext("2d");
-  g = screenCtx;
+  const canvas = $("board");
+  const minimap = $("minimap");
 
-  // ---------------------------------------------------------------- zoom & pan (bitmap scaling + scroll pan)
-  const view = { s: 1 };
-  function applyZoom() {
-    const bw = LAB + W * TILE, bh = LAB + H * TILE;
-    canvas.style.width = Math.round(bw * view.s) + "px";
-    canvas.style.height = Math.round(bh * view.s) + "px";
-  }
-  function zoomBy(f) { view.s = Math.min(2.5, Math.max(0.5, view.s * f)); applyZoom(); }
-  function zoomFit() {
-    const box = $("board-scroll");
-    const bw = LAB + W * TILE, bh = LAB + H * TILE;
-    view.s = Math.min(1.2, Math.max(0.4, Math.min((box.clientWidth - 8) / bw, (box.clientHeight - 8) / bh)));
-    applyZoom();
-  }
-  function zoomReset() { view.s = 1; applyZoom(); }
-  let panning = null, panned = false;
-  canvas.addEventListener("mousedown", e => { panning = { x: e.clientX, y: e.clientY, l: $("board-scroll").scrollLeft, t: $("board-scroll").scrollTop }; panned = false; });
-  window.addEventListener("mousemove", e => {
-    if (!panning) return;
-    const dx = e.clientX - panning.x, dy = e.clientY - panning.y;
-    if (Math.abs(dx) + Math.abs(dy) > 6) panned = true;
-    $("board-scroll").scrollLeft = panning.l - dx;
-    $("board-scroll").scrollTop = panning.t - dy;
-  });
-  window.addEventListener("mouseup", () => { panning = null; });
-  canvas.addEventListener("wheel", e => { e.preventDefault(); zoomBy(e.deltaY < 0 ? 1.12 : 0.9); }, { passive: false });
+  // zoom / pan are owned by the active renderer (shared rules in GFX.CAMERA)
+  const zoomBy = f => {
+    if (!gfx.current) return;
+    gfx.current.zoomBy(f);
+    saveManualCamera();
+  };
+  const zoomFit = () => applyCameraPreset("standard", true, true);
+  const zoomReset = () => {
+    if (!gfx.current) return;
+    gfx.current.zoomReset();
+    saveManualCamera();
+  };
 
   async function api(path, body, method) {
     const opt = body !== undefined
@@ -148,188 +155,185 @@
     } catch (e) {}
   }
 
-  // ---------------------------------------------------------------- palette
-  function pal() {
-    const light = document.documentElement.dataset.theme === "light", cvd = !!settings.cvd;
-    return {
-      light, bg: light ? "#dfe6f1" : "#070a0f", lab: light ? "#44546f" : "#8b97ae",
-      P: cvd ? (light ? "#0a58a8" : "#3aa0ff") : (light ? "#0b64b8" : "#4cc3ff"),
-      A: cvd ? (light ? "#b85c00" : "#ff9f1c") : (light ? "#c62828" : "#ff5d5d"),
-      uP: light ? "#d4e6fa" : "#123349", uA: light ? "#fadcdc" : "#3d1618",
-      text: light ? "#0e1a2c" : "#eef3ff", grid: light ? "rgba(0,0,0,.07)" : "rgba(255,255,255,.045)",
-      tiles: light ? { ".": ["#cfe3b8", "#c6dbae"], "=": ["#c3bcae", "#bcb5a6"], "F": ["#8fbf8a", "#86b681"],
-                       "M": ["#aaa49b", "#b3ada4"], "W": ["#8ec3e6", "#86bce0"], "S": ["#a9b27f", "#a1aa77"],
-                       "B": ["#b9a98e", "#b2a287"], "U": ["#c9b7a0", "#c2b099"], "R": ["#9aa3ad", "#939ca7"],
-                       "~": ["#e0d3a8", "#d8cba0"], "O": ["#7fb2d9", "#77abd4"] }
-                   : { ".": ["#1b2331", "#1e2837"], "=": ["#2b2f3a", "#303542"], "F": ["#17301f", "#1a3a24"],
-                       "M": ["#333a45", "#3a4250"], "W": ["#0f2f4a", "#123a5c"], "S": ["#262c17", "#2b321b"],
-                       "B": ["#4a3b28", "#51422d"], "U": ["#3d3630", "#453d36"], "R": ["#27313d", "#2c3844"],
-                       "~": ["#6b5d3a", "#74653f"], "O": ["#0d2337", "#10293f"] },
-      glyph: light ? { "=": "#6f685b", "M": "#6c675f", "W": "#2f6a99", "S": "#6a7340", "F": "#2f6a3a",
-                       "B": "#7a5c2e", "U": "#7d5a44", "R": "#4a545f", "~": "#8a7a4a", "O": "#1e5a86" }
-                   : { "=": "#8892a8", "M": "#8f9bb5", "W": "#3f7ab5", "S": "#7d8a4a", "F": "#2c6b3c",
-                       "B": "#c9a86a", "U": "#c79b7a", "R": "#7f95ad", "~": "#d9c98a", "O": "#3f8ac0" },
-    };
+  // ---------------------------------------------------------------- graphics (renderer interface: static/js/gfx)
+  const gfxPrefs = () => ({ light: document.documentElement.dataset.theme === "light", cvd: !!settings.cvd,
+                            keyboard: !!settings.keyboard, hoverfx: settings.hoverfx !== false,
+                            lod: settings.lod !== false, zoomToCursor: settings.zoomToCursor !== false,
+                            smoothPan: settings.smoothPan !== false,
+                            doubleClickCenter: settings.doubleClickCenter !== false });
+  const pal = () => GFX.classicPalette(gfxPrefs());
+  function frameData() {           // per-frame, purely visual snapshot handed to the active renderer
+    if (!state || !TERRAIN.length) return null;
+    return { state, seen, visible, sel, hover, cursor, flash, floats, anim, W, H, terrain: TERRAIN,
+             now: performance.now(), marks: state.tutorial && state.tutorial.marks,
+             unitDef: t => U(t) || UDEF };
   }
-  const CLSCOL = { foot: "#2b8a4a", tread: "#b8761a", air: "#2b82b8" };
-  const px = x => LAB + x * TILE, py = y => LAB + y * TILE;
+  const gfxHost = {
+    container: $("board-scroll"),
+    frameData,
+    afterFrame() {
+      const now = performance.now(); floats = floats.filter(f => now - f.born < 1100);
+      drawMinimap();
+    },
+    onRendererReady(r, cam) {
+      r.setPrefs(gfxPrefs()); r.setBoard({ w: W, h: H, terrain: TERRAIN }); r.resize();
+      if (cam) r.setCamera(cam);
+      else if (settings.cameraPreset === "manual") r.setCamera({ zoom: settings.manualZoom });
+      else r.zoomToPreset(settings.cameraPreset, settings.autoTile);
+      updatePresetButtons();
+    },
+    handlers: {
+      onTile: (x, y) => activate(x, y, false),
+      onClickStart: () => focusBoard(),
+      onDoubleClick: (x, y) => {
+        if (settings.doubleClickCenter && gfx.current) gfx.current.centerOnTile(x, y);
+      },
+      onContext: () => { cancelSel(); lastPick = null; },
+      onZoom: () => { saveManualCamera(); drawMinimap(); },
+      onCameraChange: () => drawMinimap(),
+      onHover: (h, e) => {
+        if (!e) { hover = null; return; }
+        if ((h && h.x) !== (hover && hover.x) || (h && h.y) !== (hover && hover.y)) markDirty();
+        hover = h; updateStatusline();
+      },
+    },
+  };
+  const gfx = new GFX.RenderManager(gfxHost);
+  GFX.manager = gfx;                 // handle for diagnostics and later stages
+  function markDirty() { gfx.markDirty(); }
+  function focusBoard() { const el = (gfx.current && gfx.current.element) || canvas; el.focus({ preventScroll: true }); }
+  gfx.start();
 
-  // ---------------------------------------------------------------- drawing
-  function drawScene(target, ui) {
-    const prev = g; g = target;
-    try {
-      const P = pal(), cw = LAB + W * TILE, ch = LAB + H * TILE;
-      g.fillStyle = P.bg; g.fillRect(0, 0, cw, ch);
-      g.font = "bold 11px system-ui"; g.fillStyle = P.lab; g.textAlign = "center"; g.textBaseline = "middle";
-      for (let x = 0; x < W; x++) g.fillText(String.fromCharCode(65 + x), px(x) + TILE / 2, LAB / 2);
-      for (let y = 0; y < H; y++) g.fillText(String(y + 1), LAB / 2, py(y) + TILE / 2);
-      const GL = { "=": "═", "M": "▲", "W": "≋", "S": "⁞", "F": "♣", "B": "≡", "U": "▦", "R": "╬",
-                   "~": "∴", "O": "≈" };
-      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        if (!TERRAIN[y]) continue;
-        const c = TERRAIN[y][x], [c1, c2] = P.tiles[c] || P.tiles["."];
-        g.fillStyle = (x + y) % 2 ? c1 : c2; g.fillRect(px(x), py(y), TILE, TILE);
-        if (GL[c]) { g.fillStyle = P.glyph[c]; g.font = "13px system-ui"; g.fillText(GL[c], px(x) + TILE / 2, py(y) + TILE / 2); }
-        const k = key(x, y);
-        if (!seen.has(k)) { g.fillStyle = "rgba(3,5,8,0.88)"; g.fillRect(px(x), py(y), TILE, TILE); }
-        else if (!visible.has(k)) { g.fillStyle = "rgba(3,5,8,0.45)"; g.fillRect(px(x), py(y), TILE, TILE); }
-      }
-      g.strokeStyle = P.grid; g.lineWidth = 1;
-      for (let x = 0; x <= W; x++) { g.beginPath(); g.moveTo(px(x), LAB); g.lineTo(px(x), ch); g.stroke(); }
-      for (let y = 0; y <= H; y++) { g.beginPath(); g.moveTo(LAB, py(y)); g.lineTo(cw, py(y)); g.stroke(); }
-      drawBuildings(P);
-      if (ui && sel) drawSelection(P);
-      drawUnits(P);
-      if (ui) { drawForecast(P); drawFloats(P); drawCursor(P); }
-    } finally { g = prev; }
+  function updateLayout() {
+    const layout = document.querySelector(".layout");
+    if (!layout) return;
+    layout.classList.toggle("adaptive", settings.adaptiveView !== false);
+    layout.classList.toggle("side-collapsed", !!settings.sideCollapsed);
+    const button = $("panel-toggle");
+    if (button) {
+      button.setAttribute("aria-expanded", settings.sideCollapsed ? "false" : "true");
+      button.title = settings.sideCollapsed ? "Show battle information panel" : "Collapse battle information panel";
+      button.innerHTML = settings.sideCollapsed
+        ? '<i class="bi bi-layout-sidebar"></i> Show panels'
+        : '<i class="bi bi-layout-sidebar"></i> Panels';
+    }
+    if (gfx.current) gfx.current.resize();
   }
-  function drawBuildings(P) {
-    const GL = { HQ: "★", factory: "⚙", city: "⌂", barracks: "⛺", fort: "✚",
-                 radar: "◉", airbase: "✈", airfield: "✈", harbor: "⚓", port: "⚓",
-                 shipyard: "⚒", battery: "☗" };
+  function updatePresetButtons() {
+    for (const preset of ["strategic", "standard", "tactical"]) {
+      const selected = settings.cameraPreset === preset;
+      $("zoom-" + preset).classList.toggle("active", selected);
+      $("zoom-" + preset).setAttribute("aria-pressed", selected ? "true" : "false");
+    }
+  }
+  function saveManualCamera() {
+    if (!gfx.current) return;
+    settings.cameraPreset = "manual";
+    settings.manualZoom = gfx.current.getCamera().zoom;
+    updatePresetButtons();
+    saveSettings();
+  }
+  function applyCameraPreset(preset, persist = true, forceFit = false) {
+    if (!gfx.current) return;
+    settings.cameraPreset = preset;
+    if (preset === "manual") gfx.current.setCamera({ zoom: settings.manualZoom });
+    else {
+      gfx.current.zoomToPreset(preset, forceFit || settings.autoTile !== false);
+      gfx.current.centerOnTile((W - 1) / 2, (H - 1) / 2, false);
+    }
+    if (persist) {
+      settings.manualZoom = gfx.current.getCamera().zoom;
+      saveSettings();
+    }
+    updatePresetButtons();
+    drawMinimap();
+  }
+  function drawMinimap() {
+    if (!minimap || !state || !settings.minimap) return;
+    const width = 220, height = Math.max(88, Math.round(width * H / Math.max(1, W)));
+    if (minimap.width !== width || minimap.height !== height) {
+      minimap.width = width;
+      minimap.height = height;
+    }
+    const ctx = minimap.getContext("2d");
+    const cellW = width / W, cellH = height / H, terrain = state.ter || TERRAIN;
+    const colors = pal().tiles;
+    ctx.clearRect(0, 0, width, height);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const k = key(x, y), visibleNow = visible.has(k), explored = seen.has(k);
+      if (!explored) ctx.fillStyle = "#080d14";
+      else {
+        const c = terrain[y] && terrain[y][x], pair = colors[c] || colors["."];
+        ctx.fillStyle = visibleNow ? pair[(x + y) % 2] : "#202a36";
+      }
+      ctx.fillRect(x * cellW, y * cellH, Math.ceil(cellW), Math.ceil(cellH));
+    }
+    ctx.globalAlpha = 1;
+    // buildings: solid squares with a dark frame (HQ larger, with a light core); units: small round dots, air as diamonds
     for (const b of state.buildings) {
-      const x = px(b.x), y = py(b.y);
-      const col = b.side ? P[b.side] : (P.light ? "#59657b" : "#9aa7bb");
-      g.globalAlpha = b.visible ? 1 : 0.55;
-      g.fillStyle = P.light ? "rgba(255,255,255,.45)" : "rgba(255,255,255,0.05)";
-      g.fillRect(x + 3, y + 3, TILE - 6, TILE - 6);
-      g.strokeStyle = col; g.lineWidth = 2; g.strokeRect(x + 4, y + 4, TILE - 8, TILE - 8);
-      g.fillStyle = col; g.font = `${b.type === "HQ" ? 22 : 17}px system-ui`;
-      g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(GL[b.type], x + TILE / 2, y + TILE / 2 - 2);
-      if (b.level > 1) { g.font = "bold 9px system-ui"; g.fillText("L" + b.level, x + TILE - 9, y + 8); }
-      if (b.cap) { g.font = "bold 9px system-ui"; g.fillStyle = "#ffb454";
-        g.fillText(`${b.cap.pts}/${b.cap.side === "P" ? (b.type === "HQ" ? 3 : 2) : "?"}`, x + 6, y + TILE - 7); }
-      if (state.queue) {
-        const q = state.queue.find(o => o.x === b.x && o.y === b.y);
-        if (q) { g.font = "bold 10px system-ui"; g.fillStyle = "#ffb454";
-                 g.fillText("⚙" + q.left, x + 5, y + 10); }
-      }
-      if (b.hp !== undefined) {
-        g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(x + 6, y + TILE - 8, TILE - 12, 4);
-        g.fillStyle = b.hp / b.max_hp > 0.4 ? "#ffb454" : "#ff5d5d";
-        g.fillRect(x + 6, y + TILE - 8, (TILE - 12) * b.hp / b.max_hp, 4);
-      }
-      g.globalAlpha = 1;
+      if (!seen.has(key(b.x, b.y))) continue;
+      const base = Math.min(cellW, cellH), size = Math.max(4, base * (b.type === "HQ" ? 0.95 : 0.78)), cx = (b.x + 0.5) * cellW, cy = (b.y + 0.5) * cellH;
+      ctx.fillStyle = "rgba(0,0,0,.85)"; ctx.fillRect(cx - size / 2 - 1, cy - size / 2 - 1, size + 2, size + 2);
+      ctx.fillStyle = b.side === "P" ? "#1f7fc0" : b.side === "A" ? "#c23a3a" : "#8d99ad";
+      ctx.fillRect(cx - size / 2, cy - size / 2, size, size);
+      if (b.type === "HQ") { ctx.fillStyle = "#fff"; ctx.fillRect(cx - size / 5, cy - size / 5, size * 0.4, size * 0.4); }
     }
-  }
-  function drawSelection(P) {
-    g.fillStyle = P.light ? "rgba(10,100,200,.28)" : "rgba(76,195,255,0.22)";
-    for (const k of sel.moves) { const [x, y] = k.split(",").map(Number); g.fillRect(px(x) + 2, py(y) + 2, TILE - 4, TILE - 4); }
-    for (const [id] of sel.attacks) {
-      const u = findUnit(id); if (!u) continue;
-      g.strokeStyle = P.A; g.lineWidth = 3; g.strokeRect(px(u.x) + 2, py(u.y) + 2, TILE - 4, TILE - 4);
-    }
-    const u = sel.unit;
-    g.strokeStyle = P.P; g.lineWidth = 2; g.strokeRect(px(u.x) + 1, py(u.y) + 1, TILE - 2, TILE - 2);
-  }
-  function unitPos(u) {
-    if (anim && anim.id === u.id) {
-      const t = Math.min(1, (performance.now() - anim.start) / anim.dur), e = 1 - Math.pow(1 - t, 2);
-      return [anim.fx + (anim.tx - anim.fx) * e, anim.fy + (anim.ty - anim.fy) * e];
-    }
-    return [u.x, u.y];
-  }
-  function drawUnits(P) {
-    const stacks = {};
     for (const u of state.units) {
-      const k = u.x + "," + u.y;
-      const n = stacks[k] = (stacks[k] || 0) + 1;
-      const off = n > 1 ? 7 : 0;
-      const [gx, gy] = unitPos(u), x = LAB + gx * TILE + off, y = LAB + gy * TILE - off,
-            t = U(u.type) || UDEF;
-      const col = P[u.side];
-      const spent = u.side === "P" && (u.acted || (u.moved && !t.move_fire));
-      g.globalAlpha = spent ? 0.5 : 1;
-      g.fillStyle = u.side === "P" ? P.uP : P.uA; g.strokeStyle = col; g.lineWidth = 2;
-      roundRect(x + 4, y + 4, TILE - 8, TILE - 8, 6); g.fill(); g.stroke();
-      g.fillStyle = P.light ? P.text : col; g.font = "bold 12px system-ui"; g.textAlign = "center"; g.textBaseline = "middle";
-      g.fillText(t.code, x + TILE / 2, y + TILE / 2 - 3);
-      g.fillStyle = CLSCOL[t.cls]; g.fillRect(x + 5, y + 5, 11, 11);
-      g.fillStyle = "#fff"; g.font = "bold 8px system-ui"; g.fillText(t.cls[0].toUpperCase(), x + 10.5, y + 11);
-      g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(x + 7, y + TILE - 11, TILE - 14, 5);
-      const r = u.hp / u.mhp;
-      g.fillStyle = r > 0.5 ? "#2fd47a" : r > 0.25 ? "#ffb454" : "#ff5d5d";
-      g.fillRect(x + 7, y + TILE - 11, (TILE - 14) * r, 5);
-      g.fillStyle = P.light ? P.text : "#fff"; g.font = "bold 9px system-ui"; g.textAlign = "right";
-      g.fillText(String(u.hp), x + TILE - 6, y + 11); g.textAlign = "center";
-      g.globalAlpha = 1;
+      if (u.side !== "P" && !visible.has(key(u.x, u.y))) continue;
+      const base = Math.min(cellW, cellH), r = Math.max(2.4, base * 0.34), cx = (u.x + 0.5) * cellW, cy = (u.y + 0.5) * cellH, air = ((U(u.type) || UDEF).cls === "air");
+      ctx.beginPath();
+      if (air) { ctx.moveTo(cx, cy - r * 1.3); ctx.lineTo(cx + r * 1.3, cy); ctx.lineTo(cx, cy + r * 1.3); ctx.lineTo(cx - r * 1.3, cy); ctx.closePath(); }
+      else ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = u.side === "P" ? "#7fe0ff" : "#ffb199"; ctx.fill();
+      ctx.lineWidth = 1.2; ctx.strokeStyle = u.side === "P" ? "#0b4f7a" : "#7a1717"; ctx.stroke();
     }
+    const box = $("board-scroll"), camera = gfx.current && gfx.current.getCamera();
+    if (box && camera) {
+      const tilePx = 44 * camera.zoom;
+      const left = Math.max(0, Math.min(W, (camera.panX - 22 * camera.zoom) / tilePx));
+      const top = Math.max(0, Math.min(H, (camera.panY - 22 * camera.zoom) / tilePx));
+      const vw = Math.min(W - left, box.clientWidth / tilePx), vh = Math.min(H - top, box.clientHeight / tilePx);
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
+      ctx.strokeRect(left * cellW + 0.5, top * cellH + 0.5,
+        Math.max(2, vw * cellW - 1), Math.max(2, vh * cellH - 1));
+      ctx.strokeStyle = "rgba(0,0,0,.8)"; ctx.lineWidth = 3;
+      ctx.strokeRect(left * cellW + 0.5, top * cellH + 0.5,
+        Math.max(2, vw * cellW - 1), Math.max(2, vh * cellH - 1));
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1;
+      ctx.strokeRect(left * cellW + 0.5, top * cellH + 0.5,
+        Math.max(2, vw * cellW - 1), Math.max(2, vh * cellH - 1));
+    }
+    ctx.globalAlpha = 1;
   }
-  function roundRect(x, y, w, h, r) {
-    g.beginPath(); g.moveTo(x + r, y);
-    g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
-    g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+  function navigateMinimap(e, smooth = settings.smoothPan) {
+    const r = minimap.getBoundingClientRect();
+    const x = Math.max(0, Math.min(W - 1, Math.floor((e.clientX - r.left) / r.width * W)));
+    const y = Math.max(0, Math.min(H - 1, Math.floor((e.clientY - r.top) / r.height * H)));
+    if (gfx.current) gfx.current.centerOnTile(x, y, smooth);
   }
-  function drawForecast(P) {
-    if (!sel || settings.hoverfx === false) return;
-    for (const tile of [hover, settings.keyboard ? cursor : null]) {
-      if (!tile) continue;
-      const u = unitAt(tile.x, tile.y);
-      const bb = u ? null : buildingAt(tile.x, tile.y);
-      const tgt = u || bb;
-      if (!tgt) continue;
-      const a = sel.attacks.get(tgt.id);
-      if (!a) continue;
-      const txt = `-${a.dmg}${a.counter ? "  ↩" + a.counter : ""}${a.kill ? "  KILL" : ""}`;
-      g.font = "bold 12px system-ui"; const w = g.measureText(txt).width + 12;
-      const bx = Math.min(Math.max(px(tile.x) + TILE / 2 - w / 2, LAB), LAB + W * TILE - w), by = Math.max(py(tile.y) - 20, 0);
-      g.fillStyle = "rgba(10,14,20,.92)"; g.fillRect(bx, by, w, 18);
-      g.strokeStyle = P.A; g.lineWidth = 1; g.strokeRect(bx, by, w, 18);
-      g.fillStyle = "#fff"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(txt, bx + w / 2, by + 9);
-    }
-  }
-  function drawFloats() {
-    const now = performance.now();
-    floats = floats.filter(f => now - f.born < 1100);
-    for (const f of floats) {
-      const t = (now - f.born) / 1100;
-      g.globalAlpha = 1 - t; g.fillStyle = f.color; g.font = "bold 14px system-ui";
-      g.strokeStyle = "rgba(0,0,0,.7)"; g.lineWidth = 3; g.textAlign = "center";
-      const x = px(f.x) + TILE / 2, y = py(f.y) - 4 - t * 22;
-      g.strokeText(f.text, x, y); g.fillText(f.text, x, y); g.globalAlpha = 1;
-    }
-  }
-  function drawCursor(P) {
-    if (hover) { g.strokeStyle = "rgba(255,255,255,.4)"; g.lineWidth = 1; g.strokeRect(px(hover.x) + 1, py(hover.y) + 1, TILE - 2, TILE - 2); }
-    if (settings.keyboard) {
-      const pulse = 0.65 + 0.35 * Math.sin(performance.now() / 180);
-      g.strokeStyle = `rgba(255,180,84,${pulse})`; g.lineWidth = 3;
-      g.strokeRect(px(cursor.x) + 1.5, py(cursor.y) + 1.5, TILE - 3, TILE - 3);
-    }
-    if (flash && performance.now() - flash.t < 1400) {
-      g.strokeStyle = `rgba(255,255,80,${1 - (performance.now() - flash.t) / 1400})`; g.lineWidth = 4;
-      g.strokeRect(px(flash.x) - 2, py(flash.y) - 2, TILE + 4, TILE + 4);
-    }
-  }
-  let dirty = true;
-  function markDirty() { dirty = true; }
-  (function loop() {
-    if (state && TERRAIN.length && (dirty || anim || floats.length || hover)) {
-      dirty = false;                       // clear first: a throw can never wedge the loop
-      try { drawScene(screenCtx, true); } catch (e) { /* one bad frame must not freeze the board */ }
-    }
-    requestAnimationFrame(loop);
-  })();
+  let minimapDragging = false;
+  minimap.addEventListener("pointerdown", e => {
+    minimapDragging = true;
+    minimap.setPointerCapture(e.pointerId);
+    navigateMinimap(e, settings.smoothPan);
+    e.preventDefault();
+  });
+  minimap.addEventListener("pointermove", e => { if (minimapDragging) navigateMinimap(e, false); });
+  minimap.addEventListener("pointerup", () => { minimapDragging = false; });
+  minimap.addEventListener("pointercancel", () => { minimapDragging = false; });
+  const viewportObserver = new ResizeObserver(() => {
+    if (!gfx.current) return;
+    gfx.current.resize();
+    if (settings.autoTile && settings.cameraPreset !== "manual")
+      applyCameraPreset(settings.cameraPreset, false);
+    else drawMinimap();
+  });
+  viewportObserver.observe($("board-scroll"));
+  window.addEventListener("resize", () => {
+    if (settings.autoTile && settings.cameraPreset !== "manual")
+      applyCameraPreset(settings.cameraPreset, false);
+    else drawMinimap();
+  });
 
   function pop(x, y, text, color) { floats.push({ x, y, text, color, born: performance.now() }); }
 
@@ -374,8 +378,12 @@
   function loadState(s) {
     if (s.w && s.h && (s.w !== W || s.h !== H)) {       // board size is per-game (tier 4+)
       W = s.w; H = s.h;
-      canvas.width = LAB + W * TILE; canvas.height = LAB + H * TILE;
-      view.s = 1;
+      gfx.current.setBoard({ w: W, h: H, terrain: TERRAIN });
+      if (settings.cameraPreset === "manual") gfx.current.setCamera({ zoom: settings.manualZoom });
+      else {
+        gfx.current.zoomToPreset(settings.cameraPreset, settings.autoTile);
+        gfx.current.centerOnTile((W - 1) / 2, (H - 1) / 2, false);
+      }
     }
     if (s.ter && s.ter.length === H && s.ter[0].length === W) {   // live terrain
       let diff = TERRAIN.length !== s.ter.length;
@@ -386,13 +394,14 @@
       if (m.terrain.length === H && TERRAIN !== m.terrain) TERRAIN = m.terrain;
     }
     if (s.tier && s.tier !== manualTier) buildManual();
-    applyZoom();
+    gfx.current.resize();
     state = s; visible = new Set(s.visible); seen = new Set(s.seen);
     if (sel) { const u = findUnit(sel.unit.id); if (u) sel.unit = u; else sel = null; }
     if (selB) { const b = buildingAt(selB.x, selB.y); if (b) selB = b; }   // capture/upgrade refresh
     const prevCredits = state ? state.credits : 0;
     const wasMyTurn = state ? state.your_turn !== false : false;
-    updateTop(); updateInfo(); renderLog(); renderLedger(); watchOpponent(); rebuildIndex(); markDirty();
+    updateTop(); updateInfo(); renderLog(); renderLedger(); watchOpponent(); rebuildIndex(); markDirty(); drawMinimap();
+    renderTutorial(s);
     if (!s.over) {
       let phase = s.turn_label || (s.your_turn ? "Your move" : "Opponent's move");
       if (s.level === "pvp" && s.your_turn === false && s.opp_online === false)
@@ -426,6 +435,7 @@
     else setInfo(`<span class="muted">Select a unit, building or tile. Click, or use the cursor and <kbd>Enter</kbd>.</span>`);
   }
   function showUnitInfo(u, selectable) {
+    tutInspect(u);
     const t = U(u.type) || UDEF, mine = u.side === "P";
     const st = mine ? (u.acted ? "spent" : u.moved ? "moved — can still attack" : "ready") : "hostile";
     const satk = v => v > 0 ? Math.max(1, Math.round(v * u.hp / u.mhp)) : 0;   // real, HP-scaled ATK
@@ -562,8 +572,10 @@
     const q = state.queue ? state.queue.filter(o => o.x === b.x && o.y === b.y) : [];
     const qTxt = q.length ? `<div class="sub">⚙ Producing ${(U(q[0].utype) || UDEF).code} — ${q[0].left} turn(s) left.</div>` : "";
     const upTxt = b.upgrading ? `<div class="sub">⚙ Upgrading — ${b.upgrading} turn(s) left.</div>` : "";
-    const moneyOnly = ["HQ", "city"].includes(b.type)
-      ? `<div class="sub">Income building — it produces credits only and builds nothing.</div>` : "";
+    const moneyOnly = b.type === "city"
+      ? `<div class="sub">Income building — it produces credits only and builds nothing.</div>`
+      : b.type === "HQ"
+        ? `<div class="sub">Headquarters — earns income and is your flight line: ${(state.tier || 2) < 5 ? "it builds aircraft until airbases arrive in Tier 5" : "protect it"}. Lose it and the battle is lost.</div>` : "";
     setInfo(`<div><span class="title">${names[b.type]}</span> ${owner} · ${label(b.x, b.y)}${b.visible ? "" : " <span class='muted'>(last seen)</span>"}${capTxt}</div>${upTxt}${qTxt}${moneyOnly}
       ${["battery", "radar"].includes(b.type) && META.defenses ? (() => {
         const D = META.defenses[b.type];
@@ -604,14 +616,13 @@
         addBtn(`✚ Repair ${(b.max_hp - b.hp) * 5} cr`, () => doRepairBld(b.x, b.y), "good",
           state.credits < (b.max_hp - b.hp) * 5, state.credits < (b.max_hp - b.hp) * 5 ? "Insufficient funds" : "");
       }
-      if (["factory", "barracks", "airbase", "airfield", "shipyard", "harbor"].includes(b.type)) {
+      if (["HQ", "factory", "barracks", "airbase", "airfield", "shipyard", "harbor"].includes(b.type)) {
         const occupied = unitAt(b.x, b.y);
         const full = myUnits().length >= state.unit_cap;
         const producing = state.queue && state.queue.some(o => o.x === b.x && o.y === b.y);
         if (producing) $("info-actions").innerHTML += `<span class="muted">⏳ Production underway — the next order must wait.</span>`;
         else if (occupied) $("info-actions").innerHTML += `<span class="muted">Tile occupied — move the unit out to build.</span>`;
-        else tierUnits().filter(k => (U(k).sites || []).includes(b.type)
-            && (U(k).tech || 1) <= (b.level || 1))
+        else tierUnits().filter(k => canBuildAt(k, b))
           .forEach((k, i) => addBtn(`<b>${i + 1}</b> ${U(k).code} · ${U(k).cost}`,
             () => doBuild(b.x, b.y, k), "", state.credits < U(k).cost || full,
             full ? "Unit cap reached" : state.credits < U(k).cost ? "Insufficient funds" : ""));
@@ -744,6 +755,7 @@
       selB = null;
       sel = { unit: findUnit(u.id) || u, moves: new Set(j.moves.map(p => key(p[0], p[1]))),
               attacks: new Map(j.attacks.map(a => [a.id, a])) };
+      if (settings.autoCenter && gfx.current) gfx.current.centerOnTile(u.x, u.y);
       showUnitInfo(sel.unit, true); beep("select");
     } catch (e) { err(e); }
   }
@@ -752,19 +764,20 @@
     try {
       const j = await api("/api/move", { unit: id, x, y });
       const mv = (j.events || []).find(e => e.t === "move");
-      if (mv) anim = { id, fx: from.x, fy: from.y, tx: mv.to[0], ty: mv.to[1], start: performance.now(), dur: speed(300) || 1 };
+      if (mv) anim = { id, fx: from.x, fy: from.y, tx: mv.to[0], ty: mv.to[1], start: performance.now(), path: mv.path,
+                       dur: speed(mv.path && mv.path.length > 2 ? Math.min(950, 180 + 80 * (mv.path.length - 1)) : 300) || 1 };
       loadState(j.state); await showEvents(j.events); beep("move");
       const u = findUnit(id);
       const spent = !u || u.acted || (u.moved && !(U(u.type) || UDEF).move_fire);
       if (u && !state.over && !spent) await selectUnit(u);   // stays selected until fully spent
       else { sel = null; updateInfo(); }
-      setTimeout(() => { if (anim && anim.id === id) anim = null; }, 320);
+      setTimeout(() => { if (anim && anim.id === id) anim = null; }, (anim && anim.dur ? anim.dur : 0) + 40);
     } catch (e) { err(e); updateInfo(); }
   }
   async function doAttack(targetId) {
-    const id = sel.unit.id; sel = null;
+    const id = sel.unit.id, att = { id, type: sel.unit.type, side: sel.unit.side, x: sel.unit.x, y: sel.unit.y }; sel = null;
     try { const j = await api("/api/attack", { attacker: id, target: targetId });
-      loadState(j.state); await showEvents(j.events); updateInfo(); }
+      loadState(j.state); await showEvents(j.events, att); updateInfo(); }
     catch (e) { err(e); updateInfo(); }
   }
   async function doWait(id) { sel = null; try { loadState((await api("/api/wait", { unit: id })).state); } catch (e) { err(e); } }
@@ -776,6 +789,12 @@
       selB = buildingAt(x, y); updateInfo();
       if (turns > 1) toast(`⚙ ${U(type).code} ordered — ready in ${turns} turns.`, "good");
     } catch (e) { err(e); }
+  }
+  // Before tier 5 there are no airbases: the HQ builds aircraft. From tier 5 only airbases do.
+  function canBuildAt(k, b) {
+    const u = U(k);
+    if (b.type === "HQ") return u.cls === "air" && (state.tier || 2) < 5;
+    return (u.sites || []).includes(b.type) && (u.tech || 1) <= (b.level || 1);
   }
   async function doUpgrade(x, y) { try { const j = await api("/api/upgrade", { x, y }); loadState(j.state); selB = buildingAt(x, y); updateInfo(); } catch (e) { err(e); } }
   async function doFound(id) { try { const j = await api("/api/found", { unit: id }); sel = null; loadState(j.state); } catch (e) { err(e); } }
@@ -831,8 +850,15 @@
     try { const j = await api("/api/construct", { unit: id, kind, x, y }); loadState(j.state); beep("select"); }
     catch (e) { err(e); }
   }
-  async function showEvents(events) {
+  function fxEvent(e, att) {          // visual effects for the player's own actions (fog-safe, same path as enemy events)
+    if (!gfx.current || !state) return;
+    const ev = e.t === "bldhit" && att ? Object.assign({}, e, { a: att }) : e;
+    const safe = GFX.FogSafe.sanitize(ev, { visible, W, H, buildings: state.buildings });
+    if (safe) gfx.current.playEvent(safe);
+  }
+  async function showEvents(events, att) {
     for (const e of events || []) {
+      if (e.t === "combat" || e.t === "bldhit" || e.t === "capture") fxEvent(e, att);
       if (e.t === "combat") {
         pop(e.d.x, e.d.y, e.dk ? "DESTROYED" : "-" + e.dmg, e.dk ? "#ff6b6b" : "#ffb454");
         if (e.counter && e.a) pop(e.a.x, e.a.y, "↩-" + e.counter, "#ffb454");
@@ -904,6 +930,8 @@
       if (had && last.s !== "P") {
         toast(`New message from ${last.u}.`, "good");
         beep("msg");
+        const tab = document.querySelector('.tab[data-tab="chat"]');
+        if (tab && !tab.classList.contains("active")) tab.classList.add("has-msg");
       }
     } catch (e) { /* ignore */ }
   }
@@ -938,12 +966,16 @@
     } catch (e) { busy = false; err(e); updateTop(); }
   }
   function pushLog(e) { if (e.log) { for (const l of e.log) state.log.push(l); renderLog(); } }
-  async function replayEvent(e) {
-    pushLog(e);
+  async function replayEvent(raw) {
+    pushLog(raw);                                   // log text is already redacted by the server
+    const e = GFX.FogSafe.sanitize(raw, { visible, W, H, buildings: state.buildings });
+    if (!e) return;                                 // nothing the player may see: nothing is animated
+    if (gfx.current) gfx.current.playEvent(e);      // visual effects only; receives the fog-safe event
     if (e.t === "move") {
       let u = findUnit(e.u.id);
       if (!u) { u = Object.assign({ mhp: (U(e.u.type) || UDEF).hp, moved: true, acted: true }, e.u); u.x = e.from[0]; u.y = e.from[1]; state.units.push(u); }
-      anim = { id: u.id, fx: e.from[0], fy: e.from[1], tx: e.to[0], ty: e.to[1], start: performance.now(), dur: speed(380) || 1 };
+      anim = { id: u.id, fx: e.from[0], fy: e.from[1], tx: e.to[0], ty: e.to[1], start: performance.now(), fade: e.fade, path: e.path,
+               dur: speed(e.path && e.path.length > 2 ? Math.min(1000, 200 + 85 * (e.path.length - 1)) : 380) || 1 };
       await sleep(400); u.x = e.to[0]; u.y = e.to[1]; anim = null;
       if (!e.to_vis) state.units = state.units.filter(x => x.id !== u.id);
       else if (!e.from_vis) { pop(e.to[0], e.to[1], "CONTACT", "#ff6b6b"); beep("contact"); }
@@ -972,7 +1004,7 @@
   function closeModal(id) {
     id = id || modalStack[modalStack.length - 1]; if (!id) return;
     $(id).classList.add("hidden"); const i = modalStack.lastIndexOf(id); if (i >= 0) modalStack.splice(i, 1);
-    if (!modalStack.length) canvas.focus({ preventScroll: true });
+    if (!modalStack.length) focusBoard();
   }
   function confirmDialog(title, text, buttons) {
     $("confirm-title").textContent = title; $("confirm-text").textContent = text;
@@ -1059,18 +1091,37 @@
                                         doctrine: dp ? dp.value : "territ" });
       settings.level = level; saveSettings();
       loadState(j.state);
+      if (settings.cameraPreset === "manual") gfx.current.setCamera({ zoom: settings.manualZoom });
+      else applyCameraPreset(settings.cameraPreset, false);
       const first = myUnits().find(u => !u.acted);
       if (first) cursor = { x: first.x, y: first.y };
-      canvas.focus({ preventScroll: true });
+      focusBoard();
     } catch (e) { err(e); }
   }
 
   // settings
   const SCHEMA = [
     { k: "keyboard", t: "bool", l: "Keyboard control", d: "Play with the keyboard only: cursor, hotkeys, build menu." },
+    { k: "adaptiveView", t: "bool", l: "Adaptive battlefield layout", d: "Use screen space efficiently and reduce layout margins." },
+    { k: "sideCollapsed", t: "bool", l: "Collapse battle information panel", d: "Hide the information panel for a wider battlefield." },
+    { k: "autoTile", t: "bool", l: "Responsive tile scaling", d: "Fit the default battlefield scale to the map and available viewport." },
+    { k: "cameraPreset", t: "sel", l: "Camera zoom preset", d: "Choose a strategic overview, balanced view, close tactical view, or manual zoom.",
+      o: [["strategic", "Strategic View"], ["standard", "Standard View"], ["tactical", "Tactical Detail View"], ["manual", "Manual"]] },
+    { k: "manualZoom", t: "range", l: "Manual zoom", d: "Fine-tune zoom when Manual is selected. Mouse wheel and +/- remain available.",
+      min: GFX.CAMERA.ZOOM_MIN, max: GFX.CAMERA.ZOOM_MAX, step: 0.05, fmt: v => `${Math.round(+v * 100)}%` },
+    { k: "minimap", t: "bool", l: "Interactive minimap", d: "Show fog-safe battlefield intel and the current viewport." },
+    { k: "minimapCollapsed", t: "bool", l: "Collapse minimap", d: "Keep the minimap available as a compact theater tab." },
+    { k: "lod", t: "bool", l: "Zoom-aware level of detail", d: "Simplify terrain and markers when zoomed out; retain essential battlefield cues." },
+    { k: "zoomToCursor", t: "bool", l: "Zoom toward cursor", d: "Keep the tile beneath the pointer anchored while using the mouse wheel." },
+    { k: "smoothPan", t: "bool", l: "Smooth camera centering", d: "Animate camera moves from minimap and double-click navigation." },
+    { k: "doubleClickCenter", t: "bool", l: "Double-click to center", d: "Center the camera on a tile without issuing a second order." },
+    { k: "autoCenter", t: "bool", l: "Center selected units", d: "Automatically bring a selected unit into the center of the battlefield view." },
+    { k: "keepCursorVisible", t: "bool", l: "Keep keyboard cursor visible", d: "Pan only when arrow-key navigation would move the cursor out of view." },
     { k: "theme", t: "sel", l: "Theme", d: "Dark, light, or follow your system.", o: [["dark", "Dark"], ["light", "Light"], ["auto", "System"]] },
     { k: "level", t: "sel", l: "Default AI level", d: "Used for the next new operation.", o: "levels" },
-    { k: "animspeed", t: "range", l: "Animation speed", d: "0 = instant, 100 = fastest.", min: 0, max: 100 },
+    { k: "display", t: "display", l: "Display style", d: "How the battlefield is drawn. Only changes the picture - never the game." },
+    { k: "animpct", t: "range", l: "Animation speed", d: "0% turns all animations off. 100% is normal speed.", min: 0, max: 200, step: 5,
+      fmt: v => `${v}% · ${GFX.AnimManager.label(+v)}` },
     { k: "volume", t: "range", l: "Master volume", d: "Overall loudness of all sounds.", min: 0, max: 100 },
     { k: "zoombar", t: "bool", l: "Zoom controls", d: "Show the zoom / fit / reset bar above the battlefield." },
     { k: "readycounter", t: "bool", l: "Ready-unit counter", d: "Persistent 'Ready x / Used y' count in the top bar." },
@@ -1081,52 +1132,108 @@
     { k: "bigtext", t: "bool", l: "Larger text", d: "Scales the whole interface." },
     { k: "sound", t: "bool", l: "Sound effects", d: "Small synthesized beeps." },
   ];
+  const SETTING_CATEGORIES = [
+    { title: "View", description: "Battlefield appearance and on-screen information.",
+      keys: ["adaptiveView", "sideCollapsed", "minimap", "minimapCollapsed", "lod", "theme", "display",
+             "zoombar", "readycounter", "hoverfx", "cvd", "bigtext"] },
+    { title: "Camera", description: "Zoom, navigation, and camera movement preferences.",
+      keys: ["autoTile", "cameraPreset", "manualZoom", "zoomToCursor", "smoothPan", "doubleClickCenter",
+             "autoCenter", "keepCursorVisible"] },
+    { title: "Sound", description: "Sound effects and per-event volume controls.",
+      keys: ["sound", "volume"], soundChannels: true },
+    { title: "Gameplay", description: "Controls and match behavior.",
+      keys: ["keyboard", "level", "animpct", "autosave", "confirmEnd"] },
+  ];
   function openSettings() {
     const box = $("settings-body"); box.innerHTML = "";
-    for (const s of SCHEMA) {
-      const row = document.createElement("div"); row.className = "setrow";
-      row.innerHTML = `<div class="lbl"><b>${s.l}</b><span>${s.d}</span></div>`;
-      let ctl;
-      if (s.t === "bool") {
-        ctl = document.createElement("div"); ctl.className = "form-check form-switch";
-        ctl.innerHTML = `<input class="form-check-input" type="checkbox" role="switch" ${settings[s.k] ? "checked" : ""}>`;
-        ctl.firstChild.addEventListener("change", e => { settings[s.k] = e.target.checked; saveSettings(); applySettings(); });
-      } else if (s.t === "range") {
-        ctl = document.createElement("div"); ctl.style.cssText = "display:flex;align-items:center;gap:10px;min-width:220px";
-        const rng = document.createElement("input");
-        rng.type = "range"; rng.min = s.min; rng.max = s.max; rng.value = settings[s.k];
-        rng.className = "form-range";
-        const lbl = document.createElement("b"); lbl.style.minWidth = "2.4em"; lbl.style.textAlign = "right";
-        lbl.textContent = settings[s.k];
-        rng.addEventListener("input", () => {
-          settings[s.k] = +rng.value; lbl.textContent = rng.value; saveSettings(); applySettings();
-        });
-        ctl.append(rng, lbl);
-      } else {
-        ctl = document.createElement("select"); ctl.className = "form-select form-select-sm";
-        const opts = s.o === "levels" ? orderedLevels().map(([k, _]) => [k, k[0].toUpperCase() + k.slice(1)]) : s.o;
-        ctl.innerHTML = opts.map(([v, n]) => `<option value="${v}" ${settings[s.k] === v ? "selected" : ""}>${n}</option>`).join("");
-        ctl.addEventListener("change", e => { settings[s.k] = e.target.value; saveSettings(); applySettings(); });
+    for (const group of SETTING_CATEGORIES) {
+      const section = document.createElement("section"); section.className = "settings-category";
+      const heading = document.createElement("h3"); heading.textContent = group.title;
+      section.appendChild(heading);
+      const description = document.createElement("p"); description.className = "settings-category-desc";
+      description.textContent = group.description; section.appendChild(description);
+      for (const s of SCHEMA.filter(setting => group.keys.includes(setting.k))) {
+        const row = document.createElement("div"); row.className = "setrow";
+        row.innerHTML = `<div class="lbl"><b>${s.l}</b><span>${s.d}</span></div>`;
+        let ctl;
+        if (s.t === "bool") {
+          ctl = document.createElement("div"); ctl.className = "form-check form-switch";
+          ctl.innerHTML = `<input class="form-check-input" type="checkbox" role="switch" ${settings[s.k] ? "checked" : ""}>`;
+          ctl.firstChild.addEventListener("change", e => {
+            settings[s.k] = e.target.checked;
+            saveSettings();
+            applySettings();
+            if (s.k === "autoTile" && settings.cameraPreset !== "manual")
+              applyCameraPreset(settings.cameraPreset, false);
+          });
+        } else if (s.t === "range") {
+          ctl = document.createElement("div"); ctl.style.cssText = "display:flex;align-items:center;gap:10px;min-width:220px";
+          const rng = document.createElement("input");
+          rng.type = "range"; rng.min = s.min; rng.max = s.max; rng.value = settings[s.k]; if (s.step) rng.step = s.step;
+          rng.className = "form-range";
+          const lbl = document.createElement("b"); lbl.style.minWidth = "2.4em"; lbl.style.textAlign = "right";
+          const show = v => s.fmt ? s.fmt(v) : String(v);
+          lbl.textContent = show(settings[s.k]);
+          if (s.fmt) lbl.style.minWidth = "9.5em";
+          rng.addEventListener("input", () => {
+            settings[s.k] = +rng.value; lbl.textContent = show(rng.value);
+            if (s.k === "manualZoom") {
+              settings.cameraPreset = "manual";
+              settings.manualZoom = +rng.value;
+              if (gfx.current) gfx.current.setCamera({ zoom: settings.manualZoom });
+              updatePresetButtons(); drawMinimap();
+            }
+            saveSettings(); applySettings();
+          });
+          ctl.append(rng, lbl);
+        } else if (s.t === "display") {
+          ctl = document.createElement("div"); ctl.style.cssText = "display:flex;flex-direction:column;gap:4px;min-width:220px";
+          const sel_ = document.createElement("select"); sel_.className = "form-select form-select-sm"; sel_.id = "set-display";
+          sel_.innerHTML = GFX.MODES.map(m => `<option value="${m.id}" ${settings.display === m.id ? "selected" : ""} ${m.available ? "" : "disabled"}>${m.label}${m.available ? "" : " — not available yet"}</option>`).join("");
+          const note = document.createElement("small"); note.className = "muted"; note.id = "set-display-note";
+          const noteFor = id => { const m = GFX.modeInfo(id); note.textContent = m ? m.note || "" : ""; };
+          noteFor(settings.display);
+          sel_.addEventListener("change", async e => {
+            const want = e.target.value; note.textContent = "Switching…";
+            settings.display = want; saveSettings();
+            try {
+              const r = await gfx.use(want);
+              if (r.fellBack) { settings.display = r.mode; saveSettings(); sel_.value = r.mode; toast("That display style isn't available yet - using Classic.", "bad"); }
+              noteFor(settings.display);
+            } catch (err_) { settings.display = "classic"; saveSettings(); sel_.value = "classic"; toast("Could not load that display style: " + err_.message, "bad"); await gfx.use("classic"); }
+          });
+          ctl.append(sel_, note);
+        } else {
+          ctl = document.createElement("select"); ctl.className = "form-select form-select-sm";
+          const opts = s.o === "levels" ? orderedLevels().map(([k, _]) => [k, k[0].toUpperCase() + k.slice(1)]) : s.o;
+          ctl.innerHTML = opts.map(([v, n]) => `<option value="${v}" ${settings[s.k] === v ? "selected" : ""}>${n}</option>`).join("");
+          ctl.addEventListener("change", e => {
+            settings[s.k] = e.target.value;
+            if (s.k === "cameraPreset") applyCameraPreset(settings.cameraPreset);
+            else { saveSettings(); applySettings(); }
+          });
+        }
+        row.appendChild(ctl); section.appendChild(row);
       }
-      row.appendChild(ctl); box.appendChild(row);
-    }
-    const head = document.createElement("div");
-    head.className = "setrow";
-    head.innerHTML = `<div class="lbl"><b>Sound channels</b><span>Master switch is "Sound effects" above — fine-tune each sound here.</span></div><span></span>`;
-    box.appendChild(head);
-    for (const [k, label] of Object.entries(SND_CHANNELS)) {
-      const row = document.createElement("div"); row.className = "setrow";
-      row.innerHTML = `<div class="lbl"><span>${label}</span></div>`;
-      const ctl = document.createElement("div"); ctl.style.cssText = "display:flex;align-items:center;gap:10px";
-      const sw = document.createElement("div"); sw.className = "form-check form-switch";
-      sw.innerHTML = `<input class="form-check-input" type="checkbox" role="switch" ${settings.snd[k] ? "checked" : ""}>`;
-      sw.firstChild.addEventListener("change", e => { settings.snd[k] = e.target.checked; saveSettings(); });
-      const vol = document.createElement("input");
-      vol.type = "range"; vol.min = 0; vol.max = 100; vol.value = Math.round((settings.sndvol[k] ?? 1) * 100);
-      vol.className = "form-range"; vol.style.width = "140px";
-      vol.title = "Loudness";
-      vol.addEventListener("input", () => { settings.sndvol[k] = +vol.value / 100; saveSettings(); });
-      ctl.append(sw, vol); row.appendChild(ctl); box.appendChild(row);
+      if (group.soundChannels) {
+        const head = document.createElement("div"); head.className = "settings-subhead";
+        head.textContent = "Sound channels"; section.appendChild(head);
+        for (const [k, label] of Object.entries(SND_CHANNELS)) {
+          const row = document.createElement("div"); row.className = "setrow";
+          row.innerHTML = `<div class="lbl"><span>${label}</span></div>`;
+          const ctl = document.createElement("div"); ctl.style.cssText = "display:flex;align-items:center;gap:10px";
+          const sw = document.createElement("div"); sw.className = "form-check form-switch";
+          sw.innerHTML = `<input class="form-check-input" type="checkbox" role="switch" ${settings.snd[k] ? "checked" : ""}>`;
+          sw.firstChild.addEventListener("change", e => { settings.snd[k] = e.target.checked; saveSettings(); });
+          const vol = document.createElement("input");
+          vol.type = "range"; vol.min = 0; vol.max = 100; vol.value = Math.round((settings.sndvol[k] ?? 1) * 100);
+          vol.className = "form-range"; vol.style.width = "140px";
+          vol.title = "Loudness";
+          vol.addEventListener("input", () => { settings.sndvol[k] = +vol.value / 100; saveSettings(); });
+          ctl.append(sw, vol); row.appendChild(ctl); section.appendChild(row);
+        }
+      }
+      box.appendChild(section);
     }
     openModal("modal-settings");
   }
@@ -1171,7 +1278,9 @@
   // help
   function openHelp() {
     const G = (t) => `<div class="grp">${t}</div>`, R = (k, d) => `<div><span>${d}</span><kbd>${k}</kbd></div>`;
-    $("help-body").innerHTML = G("Cursor & selection") + R("← ↑ ↓ →", "Move cursor") + R("Enter / Space", "Select · move · attack · wait") +
+    $("help-body").innerHTML = G("Camera") + R("Wheel", "Zoom toward pointer") + R("Drag", "Pan battlefield") +
+      R("Double-click", "Center on tile") + R("+ / −", "Manual zoom") + R("Minimap", "Click or drag to navigate") +
+      G("Cursor & selection") + R("← ↑ ↓ →", "Move cursor") + R("Enter / Space", "Select · move · attack · wait") +
       R("Esc", "Cancel selection / close") + R("Tab / Shift+Tab", "Next / previous ready unit") + R("T", "Cycle attack targets") + R("H", "Jump to your HQ") +
       G("Unit commands") + R("W", "Wait (end unit's turn)") + R("F", "Found factory") +
       G("Buildings") + R("1 – 8", "Build unit (building selected)") + R("U", "Upgrade building") +
@@ -1181,12 +1290,125 @@
   }
 
   // ---------------------------------------------------------------- end screen / hall of fame
+  // ---------------------------------------------------------------- tutorials
+  const tutSeen = new Set();
+  let tutShown = null;
+  function tutInspect(u) {
+    if (!state || !state.tutorial || state.tutorial.stage !== "lessons") return;
+    const name = u.side === "P" ? "inspect_own" : "inspect_enemy", k = name + u.id;
+    if (tutSeen.has(k)) return;
+    tutSeen.add(k);
+    api("/api/tutorial/event", { name, id: u.id }).then(j => { if (j.state) loadState(j.state); }).catch(() => {});
+  }
+  function tutMd(lines) {
+    const inline = t => esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+    let html = "", list = false;
+    for (const ln of lines) {
+      if (ln.startsWith("- ")) { if (!list) { html += "<ul>"; list = true; } html += `<li>${inline(ln.slice(2))}</li>`; }
+      else { if (list) { html += "</ul>"; list = false; } html += `<p>${inline(ln)}</p>`; }
+    }
+    return html + (list ? "</ul>" : "");
+  }
+  function tutModal(html, buttons) {
+    $("tut-body").innerHTML = html;
+    const box = $("tut-actions"); box.innerHTML = "";
+    for (const b of buttons) {
+      const el = document.createElement("button");
+      el.className = "btn-ig" + (b.primary ? " primary" : ""); el.textContent = b.label;
+      el.addEventListener("click", () => { closeModal("modal-tut"); b.fn && b.fn(); });
+      box.appendChild(el);
+    }
+    openModal("modal-tut");
+  }
+  function tutLessonHtml(t) {
+    const L = t.lesson;
+    let h = `<div class="tut-kicker">TIER ${t.tier} · ${esc(t.name)} · LESSON ${t.index + 1}/${t.total}</div><h2>${esc(L.title)}</h2>`;
+    if (t.briefing && t.index === 0) h = `<div class="tut-kicker">MISSION BRIEFING</div>` + tutMd(t.briefing) + "<hr>" + h;
+    h += `<h4>Learn</h4>${tutMd(L.learn)}<h4>Your task</h4><p>${esc(L.task)}</p>`;
+    h += `<div class="tut-tip"><b>Strategy tip:</b> ${esc(L.tip)}</div>`;
+    return h;
+  }
+  let tutAcking = false;
+  const tutAck = () => tutPost("/api/tutorial/ack");
+  async function tutPost(path, body) {
+    try { const j = await api(path, body || {}); if (j.state) loadState(j.state); } catch (e) { err(e); }
+  }
+  function renderTutorial(s) {
+    const t = s.tutorial;
+    let tb = $("tut-banner");
+    if (!t) { if (tb) tb.remove(); return; }
+    if (!tb) {
+      tb = document.createElement("div"); tb.id = "tut-banner"; tb.className = "tut-banner";
+      $("board-scroll").parentElement.insertBefore(tb, $("board-scroll"));
+    }
+    let h = "";
+    if (t.stage === "lessons") {
+      h = `<div><b class="tut-acc">TIER ${t.tier} TRAINING · LESSON ${t.index + 1}/${t.total} — ${esc(t.lesson.title)}</b></div>` +
+          `<div>${esc(t.lesson.task)}</div>`;
+      if (t.ui === "doctrine" && META.doctrines) {
+        const opts = (META.doctrine_order || Object.keys(META.doctrines)).map(k => `<option value="${k}">${esc(META.doctrines[k])}</option>`).join("");
+        h += `<div class="tut-row"><select id="tut-doc" class="form-select form-select-sm">${opts}</select>` +
+             `<button id="tut-doc-go" class="btn-ig sm primary">Choose doctrine</button></div>`;
+      }
+      if (!t.armed) h += `<div class="muted" style="font-size:.85rem">Read the lesson, then start it - your orders only count once the lesson has begun.</div>` +
+                         `<div class="tut-row"><button id="tut-start" class="btn-ig sm primary">Start lesson</button></div>`;
+      h += `<div class="tut-row"><button id="tut-show" class="btn-ig sm">${t.replay ? "Show lesson" : "Re-read lesson"}</button>` +
+           `<button id="tut-skip" class="btn-ig sm">Skip step</button></div>`;
+    } else if (t.stage === "final") {
+      h = `<div><b class="tut-acc">${esc(t.final.title)}</b></div><div>${esc(t.final.intro)}</div>` +
+          `<ol class="tut-obj">${t.final.objectives.map(o => `<li>${esc(o)}</li>`).join("")}</ol>` +
+          `<div class="muted" style="font-size:.85rem">The opponent now plays on its own. Win the battle to finish the tutorial.</div>`;
+    } else if (t.stage === "failed") {
+      h = `<b class="tut-acc">Training mission failed.</b> Retry it from the Training menu in the lobby.`;
+    } else if (t.stage === "complete") {
+      h = `<b class="tut-acc">${esc(t.complete.title)}</b>`;
+    }
+    tb.innerHTML = h;
+    const on = (id, fn) => { const el = $(id); if (el) el.addEventListener("click", fn); };
+    on("tut-show", () => tutModal(tutLessonHtml(t), [{ label: t.armed ? "Got it" : "Start lesson", primary: true, fn: t.armed ? null : tutAck }]));
+    on("tut-skip", () => tutPost("/api/tutorial/skip"));
+    on("tut-start", tutAck);
+    if (t.stage === "lessons" && !t.armed && t.replay && !tutAcking) {     // replays skip the explanation
+      tutAcking = true; tutAck().finally(() => { tutAcking = false; });
+    }
+    on("tut-doc-go", () => tutPost("/api/tutorial/doctrine", { doctrine: $("tut-doc").value }));
+    if (!t.replay && t.key !== tutShown && !s.over) {          // first run only: explain once per step
+      tutShown = t.key;
+      if (t.stage === "lessons") tutModal(tutLessonHtml(t), [{ label: t.index === 0 ? "Begin" : "Got it", primary: true, fn: tutAck }]);
+      else if (t.stage === "final")
+        tutModal(`<div class="tut-kicker">NO MORE LESSONS</div><h2>${esc(t.final.title)}</h2><p>${esc(t.final.intro)}</p>` +
+                 `<ol class="tut-obj">${t.final.objectives.map(o => `<li>${esc(o)}</li>`).join("")}</ol>` +
+                 `<p>From here the opponent plays on its own, like a beginner AI. Win the battle to complete the tutorial.</p>`,
+                 [{ label: "To battle", primary: true }]);
+    } else tutShown = t.key;
+  }
   function showEnd(s) {
-    const win = s.result.winner === "P";
-    $("end-title").textContent = win ? "VICTORY" : "DEFEAT";
+    const win = s.result.winner === "P", t = s.tutorial;
+    $("end-title").textContent = t ? (win ? "MISSION COMPLETE" : "MISSION FAILED") : (win ? "VICTORY" : "DEFEAT");
     $("end-title").className = win ? "" : "defeat";
-    $("end-reason").textContent = s.result.reason + (win ? ` on turn ${s.turn}.` : ".");
-    $("end-note").textContent = s.rank_note || "";
+    if (t && win && t.complete) {
+      $("end-reason").textContent = t.complete.title;
+      $("end-note").innerHTML = `${esc(t.complete.text)}<br><small>Reference entry unlocked: ${esc(t.reference || "")} (lobby → Training).</small>`;
+    } else {
+      $("end-reason").textContent = s.result.reason + (win && !t ? ` on turn ${s.turn}.` : ".");
+      $("end-note").textContent = t ? "" : (s.rank_note || "");
+    }
+    let nb = $("tut-next");
+    if (!nb) {
+      nb = document.createElement("button"); nb.id = "tut-next"; nb.className = "btn-ig primary";
+      $("rematch").parentElement.insertBefore(nb, $("rematch"));
+    }
+    nb.classList.toggle("hidden", !t);
+    if (t) {
+      const target = win ? t.next : t.tier;
+      nb.classList.toggle("hidden", !target);
+      nb.textContent = win ? `Next tutorial: Tier ${t.next}` : `Retry Tier ${t.tier} tutorial`;
+      nb.onclick = async () => {
+        nb.disabled = true;
+        try { await api("/api/tutorial/start", { tier: target }); location.reload(); }
+        catch (e) { err(e); nb.disabled = false; }
+      };
+    }
     $("end-overlay").classList.remove("hidden");
   }
   async function refreshHof() { try { renderHof((await api("/api/records")).records); } catch (e) {} }
@@ -1205,14 +1427,11 @@
 
   // ---------------------------------------------------------------- export board
   function exportBoard() {
-    const c = document.createElement("canvas"), cw = LAB + W * TILE, ch = LAB + H * TILE, bh = 30;
-    c.width = cw; c.height = ch + bh; const t = c.getContext("2d"), P = pal();
-    t.fillStyle = P.bg; t.fillRect(0, 0, c.width, c.height);
-    t.fillStyle = P.text; t.font = "bold 14px system-ui"; t.textBaseline = "middle"; t.textAlign = "left";
-    t.fillText(`IRON GRID — turn ${state.turn} — ${state.level === "pvp" ? "PvP" : "AI: " + state.level} — ${myUnits().length} units — ${state.credits} cr`, 8, bh / 2);
-    t.translate(0, bh); drawScene(t, false);
-    c.toBlob(b => { const a = document.createElement("a"); a.href = URL.createObjectURL(b);
-      a.download = `irongrid-turn-${state.turn}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); });
+    const header = `IRON GRID — turn ${state.turn} — ${state.level === "pvp" ? "PvP" : "AI: " + state.level} — ${myUnits().length} units — ${state.credits} cr`;
+    gfx.current.exportImage(frameData(), { header, headerHeight: 30 }).then(b => {
+      const a = document.createElement("a"); a.href = URL.createObjectURL(b);
+      a.download = `irongrid-turn-${state.turn}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    });
     toast("Board image saved.", "good");
   }
 
@@ -1268,7 +1487,7 @@
     const weak = Object.entries(t.atk).filter(([, v]) => v > 0 && v <= 2).map(([c]) => c);
     const chips = (strong.length ? `<span class="chip on">▲ strong: ${strong.join(", ")}</span> ` : "") +
                   (weak.length ? `<span class="chip">▽ weak: ${weak.join(", ")}</span>` : "");
-    const built = (t.sites || []).join(" / ") + ((t.tech || 1) > 1 ? ` — needs level ${t.tech}` : "");
+    const built = ((t.cls === "air" && !(state && state.tier >= 5) ? ["HQ"] : (t.sites || [])).filter((v, i, a) => a.indexOf(v) === i)).join(" / ") + ((t.tech || 1) > 1 ? ` — needs level ${t.tech}` : "");
     const turns = (META.build_times && META.build_times[k]) || 1;
     return `<div><span class="title">${t.code} — ${t.full}</span> ${clsPill(t.cls)}
       <span class="tag-p" style="text-transform:capitalize">${(META.target_class && META.target_class[k]) || "-"}</span></div>
@@ -1286,18 +1505,16 @@
     document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
     document.querySelectorAll(".tabpane").forEach(p => p.classList.toggle("hidden", p.id !== "tab-" + name));
     if (name === "records") refreshHof();
-    if (name === "chat") renderChat();
+    if (name === "chat") {
+      renderChat();
+      const tab = document.querySelector('.tab[data-tab="chat"]');
+      if (tab) tab.classList.remove("has-msg");
+    }
     if (name === "units") renderUdb();
   }
   document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
   // ---------------------------------------------------------------- input: mouse
-  function tileFromEvent(e) {
-    const r = canvas.getBoundingClientRect();
-    const sx = canvas.width / r.width, sy = canvas.height / r.height;
-    const x = Math.floor(((e.clientX - r.left) * sx - LAB) / TILE), y = Math.floor(((e.clientY - r.top) * sy - LAB) / TILE);
-    return (x >= 0 && y >= 0 && x < W && y < H) ? { x, y } : null;
-  }
   const unitsAt = (x, y) => UNIT_TILE.get(x + "," + y) || []
     .sort((a, b) => (b.side === "P") - (a.side === "P"));   // yours first
   let lastPick = null;
@@ -1363,14 +1580,6 @@
     const b = buildingAt(x, y);
     if (b) { selB = b; showBuildingInfo(b); beep("select"); } else showTerrainInfo(x, y);
   }
-  canvas.addEventListener("contextmenu", e => { e.preventDefault(); cancelSel(); lastPick = null; });
-  canvas.addEventListener("click", e => {
-    if (panned) { panned = false; return; }
-    canvas.focus({ preventScroll: true });
-    const t = tileFromEvent(e); if (t) activate(t.x, t.y, false);
-  });
-  canvas.addEventListener("mousemove", e => { const h = tileFromEvent(e); if ((h && h.x) !== (hover && hover.x) || (h && h.y) !== (hover && hover.y)) markDirty(); hover = h; updateStatusline(); });
-  canvas.addEventListener("mouseleave", () => { hover = null; });
 
   // ---------------------------------------------------------------- input: keyboard
   function readyUnits() { return myUnits().filter(u => !u.acted && !(u.moved && !(U(u.type) || UDEF).move_fire)).sort((a, b) => a.id - b.id); }
@@ -1406,16 +1615,23 @@
     if (!settings.keyboard) { if (e.key === "Escape") cancelSel(); return; }
     const k = e.key, lk = k.length === 1 ? k.toLowerCase() : k;
     const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[k];
-    if (move) { e.preventDefault(); cursor = { x: Math.min(W - 1, Math.max(0, cursor.x + move[0])), y: Math.min(H - 1, Math.max(0, cursor.y + move[1])) }; updateStatusline(); beep("select"); return; }
+    if (move) {
+      e.preventDefault();
+      cursor = { x: Math.min(W - 1, Math.max(0, cursor.x + move[0])),
+                 y: Math.min(H - 1, Math.max(0, cursor.y + move[1])) };
+      if (settings.keepCursorVisible && gfx.current) gfx.current.ensureTileVisible(cursor.x, cursor.y);
+      updateStatusline(); beep("select"); return;
+    }
     if (k === "+" || k === "=") { zoomBy(1.25); return; }
     if (k === "-") { zoomBy(0.8); return; }
     if (k === "Enter" || k === " ") { if (tag === "button") return; e.preventDefault(); activate(cursor.x, cursor.y, true); return; }
     if (k === "Escape") { cancelSel(); return; }
     if (k === "Tab") { e.preventDefault(); cycleReady(e.shiftKey ? -1 : 1); return; }
     if (busy) return;
-    const bu = tierUnits();
-    if (lk >= "1" && lk <= "8" && selB && selB.side === "P" && ["HQ", "factory"].includes(selB.type)) {
-      const k = bu[+lk - 1];
+    if (lk >= "1" && lk <= "8" && selB && selB.side === "P"
+        && ["HQ", "factory", "barracks", "airbase", "airfield", "shipyard", "harbor"].includes(selB.type)) {
+      const list = tierUnits().filter(k => canBuildAt(k, selB));
+      const k = list[+lk - 1];
       if (k) doBuild(selB.x, selB.y, k);
       return;
     }
@@ -1425,7 +1641,7 @@
       case "f": if (sel) doFound(sel.unit.id); break;
       case "u": { const b = selB || buildingAt(cursor.x, cursor.y); if (b && b.side === "P") doUpgrade(b.x, b.y); break; }
       case "d": showTab("units"); break;
-      case "h": { const hq = state.buildings.find(b => b.type === "HQ" && b.side === "P"); if (hq) { cursor = { x: hq.x, y: hq.y }; updateStatusline(); } break; }
+      case "h": { const hq = state.buildings.find(b => b.type === "HQ" && b.side === "P"); if (hq) { cursor = { x: hq.x, y: hq.y }; if (settings.keepCursorVisible) gfx.current.ensureTileVisible(hq.x, hq.y); updateStatusline(); } break; }
       case "e": requestEndTurn(); break;
       case "s": openSaves(); break;
       case "n": requestNew(); break;
@@ -1456,6 +1672,7 @@
   wire("btn-export", exportBoard);
   wire("modal-new-cancel", () => closeModal("modal-new"));
   wire("settings-close", () => closeModal("modal-settings"));
+  wire("settings-close-x", () => closeModal("modal-settings"));
   wire("saves-close", () => closeModal("modal-saves"));
   wire("help-close", () => closeModal("modal-help"));
   wire("chat-send", sendChat);
@@ -1464,21 +1681,41 @@
   wire("zoom-out", () => zoomBy(0.8));
   wire("zoom-fit", zoomFit);
   wire("zoom-reset", zoomReset);
+  wire("zoom-strategic", () => applyCameraPreset("strategic"));
+  wire("zoom-standard", () => applyCameraPreset("standard"));
+  wire("zoom-tactical", () => applyCameraPreset("tactical"));
+  wire("panel-toggle", () => {
+    settings.sideCollapsed = !settings.sideCollapsed;
+    saveSettings(); updateLayout();
+  });
+  wire("minimap-collapse", () => {
+    settings.minimapCollapsed = !settings.minimapCollapsed;
+    saveSettings(); applySettings();
+  });
 
   (async function boot() {
     applySettings();
+    await gfx.use(settings.display);           // unavailable modes fall back to Classic
     try {
       META = await api("/api/meta");
       if (!META.levels[settings.level]) settings.level = "medium";   // old saved level name
       if (META.version) document.querySelector(".brand small").textContent = "V" + META.version;
       W = META.w; H = META.h; TERRAIN = META.maps ? META.maps[0].terrain : META.map;
-      canvas.width = LAB + W * TILE; canvas.height = LAB + H * TILE;
+      gfx.current.setBoard({ w: W, h: H, terrain: TERRAIN });
       buildManual(); buildFilters(); refreshHof();
-      loadState((await api("/api/state")).state);
+      const sj = await api("/api/state");
+      if (sj.state === null && sj.note) {
+        $("statusline").textContent = sj.note;
+        confirmDialog("Operation expired", sj.note, [
+          { label: "New operation", hot: "n", cls: "primary", fn: openLevelModal },
+          { label: "Back to lobby", hot: "l", fn: () => { location.href = "/lobby"; } }]);
+        throw new Error(sj.note);
+      }
+      loadState(sj.state);
       refreshCmdr();
       const first = myUnits().find(u => !u.acted);
       if (first) cursor = { x: first.x, y: first.y };
-      canvas.focus({ preventScroll: true });
+      focusBoard();
       updateStatusline();
     } catch (e) { $("statusline").textContent = "Could not reach the server: " + e.message; }
   })();

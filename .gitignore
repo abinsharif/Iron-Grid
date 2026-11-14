@@ -1,6 +1,8 @@
 # private / generated files
-__pycache__/
+*__pycache__/
 tiers/__pycache__/
 *.pyc
 irongrid.db
 .DS_Store
+.ruff_cache
+/docs

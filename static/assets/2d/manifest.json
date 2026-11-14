@@ -1,0 +1,802 @@
+{
+ "version": 2,
+ "format": "png",
+ "px_per_tile": 128,
+ "units": {
+  "inf": {
+   "file": "units/inf.png",
+   "name": "Infantry",
+   "scale": 1
+  },
+  "ifv": {
+   "file": "units/ifv.png",
+   "name": "IFV",
+   "scale": 1
+  },
+  "afv": {
+   "file": "units/afv.png",
+   "name": "AFV",
+   "scale": 1
+  },
+  "mbt": {
+   "file": "units/mbt.png",
+   "name": "MBT",
+   "scale": 1
+  },
+  "mrl": {
+   "file": "units/mrl.png",
+   "name": "MRL",
+   "scale": 1
+  },
+  "sam": {
+   "file": "units/sam.png",
+   "name": "SAM",
+   "scale": 1
+  },
+  "heli": {
+   "file": "units/heli.png",
+   "name": "Gunship",
+   "scale": 1
+  },
+  "ah": {
+   "file": "units/ah.png",
+   "name": "Tank Hunter",
+   "scale": 1
+  },
+  "jet": {
+   "file": "units/jet.png",
+   "name": "ASF",
+   "scale": 1
+  },
+  "eng": {
+   "file": "units/eng.png",
+   "name": "Engineers",
+   "scale": 1
+  },
+  "bl": {
+   "file": "units/bl.png",
+   "name": "Bridgelayer",
+   "scale": 1
+  },
+  "at": {
+   "file": "units/at.png",
+   "name": "AT Team",
+   "scale": 1
+  },
+  "mortar": {
+   "file": "units/mortar.png",
+   "name": "Mortar",
+   "scale": 1
+  },
+  "drone": {
+   "file": "units/drone.png",
+   "name": "Attack Drone",
+   "scale": 1
+  },
+  "ht": {
+   "file": "units/ht.png",
+   "name": "Heavy Tank",
+   "scale": 1
+  },
+  "sf": {
+   "file": "units/sf.png",
+   "name": "Spec Ops",
+   "scale": 1
+  },
+  "how": {
+   "file": "units/how.png",
+   "name": "Howitzer",
+   "scale": 1
+  },
+  "uav": {
+   "file": "units/uav.png",
+   "name": "UAV",
+   "scale": 1
+  },
+  "cv": {
+   "file": "units/cv.png",
+   "name": "Command Vehicle",
+   "scale": 1
+  },
+  "intr": {
+   "file": "units/intr.png",
+   "name": "Interdictor",
+   "scale": 1
+  },
+  "sb": {
+   "file": "units/sb.png",
+   "name": "Bomber",
+   "scale": 1
+  },
+  "th": {
+   "file": "units/th.png",
+   "name": "Transport Heli",
+   "scale": 1
+  },
+  "aa": {
+   "file": "units/aa.png",
+   "name": "AA Gun",
+   "scale": 1
+  },
+  "td": {
+   "file": "units/td.png",
+   "name": "Tac Drone",
+   "scale": 1
+  },
+  "cor": {
+   "file": "units/cor.png",
+   "name": "Corvette",
+   "scale": 1
+  },
+  "fr": {
+   "file": "units/fr.png",
+   "name": "Frigate",
+   "scale": 1
+  },
+  "dd": {
+   "file": "units/dd.png",
+   "name": "Destroyer",
+   "scale": 1
+  },
+  "ca": {
+   "file": "units/ca.png",
+   "name": "Cruiser",
+   "scale": 1
+  },
+  "sub": {
+   "file": "units/sub.png",
+   "name": "Submarine",
+   "scale": 1
+  },
+  "ls": {
+   "file": "units/ls.png",
+   "name": "Landing Ship",
+   "scale": 1
+  }
+ },
+ "terrain": {
+  "=": {
+   "file": "terrain/road_ground.png",
+   "name": "road_ground"
+  },
+  "R": {
+   "file": "terrain/railway_ground.png",
+   "name": "railway_ground"
+  },
+  "B": {
+   "file": "terrain/bridge_water.png",
+   "name": "bridge_water"
+  },
+  ".": {
+   "file": "terrain/plains.png",
+   "name": "plains"
+  },
+  "F": {
+   "file": "terrain/forest.png",
+   "name": "forest"
+  },
+  "M": {
+   "file": "terrain/mountain.png",
+   "name": "mountain"
+  },
+  "W": {
+   "file": "terrain/river.png",
+   "name": "river",
+   "frames": 1,
+   "frame_ms": 140,
+   "loop": true
+  },
+  "O": {
+   "file": "terrain/ocean.png",
+   "name": "ocean",
+   "frames": 1,
+   "frame_ms": 140,
+   "loop": true
+  },
+  "S": {
+   "file": "terrain/swamp.png",
+   "name": "swamp"
+  },
+  "U": {
+   "file": "terrain/village.png",
+   "name": "village"
+  },
+  "~": {
+   "file": "terrain/beach.png",
+   "name": "beach"
+  }
+ },
+ "network": {
+  "road_isolated": {
+   "file": "terrain/road_isolated.png"
+  },
+  "road_end": {
+   "file": "terrain/road_end.png"
+  },
+  "road_straight": {
+   "file": "terrain/road_straight.png"
+  },
+  "road_corner": {
+   "file": "terrain/road_corner.png"
+  },
+  "road_t": {
+   "file": "terrain/road_t.png"
+  },
+  "road_cross": {
+   "file": "terrain/road_cross.png"
+  },
+  "railway_isolated": {
+   "file": "terrain/railway_isolated.png"
+  },
+  "railway_end": {
+   "file": "terrain/railway_end.png"
+  },
+  "railway_straight": {
+   "file": "terrain/railway_straight.png"
+  },
+  "railway_corner": {
+   "file": "terrain/railway_corner.png"
+  },
+  "railway_t": {
+   "file": "terrain/railway_t.png"
+  },
+  "railway_cross": {
+   "file": "terrain/railway_cross.png"
+  },
+  "bridge_straight": {
+   "file": "terrain/bridge_straight.png"
+  }
+ },
+ "structures": {
+  "HQ": {
+   "file": "structures/HQ.png"
+  },
+  "HQ_P": {
+   "file": "structures/HQ_P.png"
+  },
+  "HQ_A": {
+   "file": "structures/HQ_A.png"
+  },
+  "HQ_L2": {
+   "file": "structures/HQ_L2.png"
+  },
+  "HQ_P_L2": {
+   "file": "structures/HQ_P_L2.png"
+  },
+  "HQ_A_L2": {
+   "file": "structures/HQ_A_L2.png"
+  },
+  "HQ_L3": {
+   "file": "structures/HQ_L3.png"
+  },
+  "HQ_P_L3": {
+   "file": "structures/HQ_P_L3.png"
+  },
+  "HQ_A_L3": {
+   "file": "structures/HQ_A_L3.png"
+  },
+  "factory": {
+   "file": "structures/factory.png"
+  },
+  "factory_P": {
+   "file": "structures/factory_P.png"
+  },
+  "factory_A": {
+   "file": "structures/factory_A.png"
+  },
+  "factory_L2": {
+   "file": "structures/factory_L2.png"
+  },
+  "factory_P_L2": {
+   "file": "structures/factory_P_L2.png"
+  },
+  "factory_A_L2": {
+   "file": "structures/factory_A_L2.png"
+  },
+  "factory_L3": {
+   "file": "structures/factory_L3.png"
+  },
+  "factory_P_L3": {
+   "file": "structures/factory_P_L3.png"
+  },
+  "factory_A_L3": {
+   "file": "structures/factory_A_L3.png"
+  },
+  "city": {
+   "file": "structures/city.png"
+  },
+  "city_P": {
+   "file": "structures/city_P.png"
+  },
+  "city_A": {
+   "file": "structures/city_A.png"
+  },
+  "city_L2": {
+   "file": "structures/city_L2.png"
+  },
+  "city_P_L2": {
+   "file": "structures/city_P_L2.png"
+  },
+  "city_A_L2": {
+   "file": "structures/city_A_L2.png"
+  },
+  "city_L3": {
+   "file": "structures/city_L3.png"
+  },
+  "city_P_L3": {
+   "file": "structures/city_P_L3.png"
+  },
+  "city_A_L3": {
+   "file": "structures/city_A_L3.png"
+  },
+  "fort": {
+   "file": "structures/fort.png"
+  },
+  "fort_P": {
+   "file": "structures/fort_P.png"
+  },
+  "fort_A": {
+   "file": "structures/fort_A.png"
+  },
+  "fort_L2": {
+   "file": "structures/fort_L2.png"
+  },
+  "fort_P_L2": {
+   "file": "structures/fort_P_L2.png"
+  },
+  "fort_A_L2": {
+   "file": "structures/fort_A_L2.png"
+  },
+  "fort_L3": {
+   "file": "structures/fort_L3.png"
+  },
+  "fort_P_L3": {
+   "file": "structures/fort_P_L3.png"
+  },
+  "fort_A_L3": {
+   "file": "structures/fort_A_L3.png"
+  },
+  "barracks": {
+   "file": "structures/barracks.png"
+  },
+  "barracks_P": {
+   "file": "structures/barracks_P.png"
+  },
+  "barracks_A": {
+   "file": "structures/barracks_A.png"
+  },
+  "barracks_L2": {
+   "file": "structures/barracks_L2.png"
+  },
+  "barracks_P_L2": {
+   "file": "structures/barracks_P_L2.png"
+  },
+  "barracks_A_L2": {
+   "file": "structures/barracks_A_L2.png"
+  },
+  "barracks_L3": {
+   "file": "structures/barracks_L3.png"
+  },
+  "barracks_P_L3": {
+   "file": "structures/barracks_P_L3.png"
+  },
+  "barracks_A_L3": {
+   "file": "structures/barracks_A_L3.png"
+  },
+  "radar": {
+   "file": "structures/radar.png"
+  },
+  "radar_P": {
+   "file": "structures/radar_P.png"
+  },
+  "radar_A": {
+   "file": "structures/radar_A.png"
+  },
+  "radar_L2": {
+   "file": "structures/radar_L2.png"
+  },
+  "radar_P_L2": {
+   "file": "structures/radar_P_L2.png"
+  },
+  "radar_A_L2": {
+   "file": "structures/radar_A_L2.png"
+  },
+  "radar_L3": {
+   "file": "structures/radar_L3.png"
+  },
+  "radar_P_L3": {
+   "file": "structures/radar_P_L3.png"
+  },
+  "radar_A_L3": {
+   "file": "structures/radar_A_L3.png"
+  },
+  "training": {
+   "file": "structures/training.png"
+  },
+  "training_P": {
+   "file": "structures/training_P.png"
+  },
+  "training_A": {
+   "file": "structures/training_A.png"
+  },
+  "training_L2": {
+   "file": "structures/training_L2.png"
+  },
+  "training_P_L2": {
+   "file": "structures/training_P_L2.png"
+  },
+  "training_A_L2": {
+   "file": "structures/training_A_L2.png"
+  },
+  "training_L3": {
+   "file": "structures/training_L3.png"
+  },
+  "training_P_L3": {
+   "file": "structures/training_P_L3.png"
+  },
+  "training_A_L3": {
+   "file": "structures/training_A_L3.png"
+  },
+  "harbor": {
+   "file": "structures/harbor.png"
+  },
+  "harbor_P": {
+   "file": "structures/harbor_P.png"
+  },
+  "harbor_A": {
+   "file": "structures/harbor_A.png"
+  },
+  "harbor_L2": {
+   "file": "structures/harbor_L2.png"
+  },
+  "harbor_P_L2": {
+   "file": "structures/harbor_P_L2.png"
+  },
+  "harbor_A_L2": {
+   "file": "structures/harbor_A_L2.png"
+  },
+  "harbor_L3": {
+   "file": "structures/harbor_L3.png"
+  },
+  "harbor_P_L3": {
+   "file": "structures/harbor_P_L3.png"
+  },
+  "harbor_A_L3": {
+   "file": "structures/harbor_A_L3.png"
+  },
+  "shipyard": {
+   "file": "structures/shipyard.png"
+  },
+  "shipyard_P": {
+   "file": "structures/shipyard_P.png"
+  },
+  "shipyard_A": {
+   "file": "structures/shipyard_A.png"
+  },
+  "shipyard_L2": {
+   "file": "structures/shipyard_L2.png"
+  },
+  "shipyard_P_L2": {
+   "file": "structures/shipyard_P_L2.png"
+  },
+  "shipyard_A_L2": {
+   "file": "structures/shipyard_A_L2.png"
+  },
+  "shipyard_L3": {
+   "file": "structures/shipyard_L3.png"
+  },
+  "shipyard_P_L3": {
+   "file": "structures/shipyard_P_L3.png"
+  },
+  "shipyard_A_L3": {
+   "file": "structures/shipyard_A_L3.png"
+  },
+  "airbase": {
+   "file": "structures/airbase.png"
+  },
+  "airbase_P": {
+   "file": "structures/airbase_P.png"
+  },
+  "airbase_A": {
+   "file": "structures/airbase_A.png"
+  },
+  "airbase_L2": {
+   "file": "structures/airbase_L2.png"
+  },
+  "airbase_P_L2": {
+   "file": "structures/airbase_P_L2.png"
+  },
+  "airbase_A_L2": {
+   "file": "structures/airbase_A_L2.png"
+  },
+  "airbase_L3": {
+   "file": "structures/airbase_L3.png"
+  },
+  "airbase_P_L3": {
+   "file": "structures/airbase_P_L3.png"
+  },
+  "airbase_A_L3": {
+   "file": "structures/airbase_A_L3.png"
+  },
+  "airfield": {
+   "file": "structures/airfield.png"
+  },
+  "airfield_P": {
+   "file": "structures/airfield_P.png"
+  },
+  "airfield_A": {
+   "file": "structures/airfield_A.png"
+  },
+  "airfield_L2": {
+   "file": "structures/airfield_L2.png"
+  },
+  "airfield_P_L2": {
+   "file": "structures/airfield_P_L2.png"
+  },
+  "airfield_A_L2": {
+   "file": "structures/airfield_A_L2.png"
+  },
+  "airfield_L3": {
+   "file": "structures/airfield_L3.png"
+  },
+  "airfield_P_L3": {
+   "file": "structures/airfield_P_L3.png"
+  },
+  "airfield_A_L3": {
+   "file": "structures/airfield_A_L3.png"
+  },
+  "port": {
+   "file": "structures/port.png"
+  },
+  "port_P": {
+   "file": "structures/port_P.png"
+  },
+  "port_A": {
+   "file": "structures/port_A.png"
+  },
+  "port_L2": {
+   "file": "structures/port_L2.png"
+  },
+  "port_P_L2": {
+   "file": "structures/port_P_L2.png"
+  },
+  "port_A_L2": {
+   "file": "structures/port_A_L2.png"
+  },
+  "port_L3": {
+   "file": "structures/port_L3.png"
+  },
+  "port_P_L3": {
+   "file": "structures/port_P_L3.png"
+  },
+  "port_A_L3": {
+   "file": "structures/port_A_L3.png"
+  },
+  "battery": {
+   "file": "structures/battery.png"
+  },
+  "battery_P": {
+   "file": "structures/battery_P.png"
+  },
+  "battery_A": {
+   "file": "structures/battery_A.png"
+  },
+  "battery_L2": {
+   "file": "structures/battery_L2.png"
+  },
+  "battery_P_L2": {
+   "file": "structures/battery_P_L2.png"
+  },
+  "battery_A_L2": {
+   "file": "structures/battery_A_L2.png"
+  },
+  "battery_L3": {
+   "file": "structures/battery_L3.png"
+  },
+  "battery_P_L3": {
+   "file": "structures/battery_P_L3.png"
+  },
+  "battery_A_L3": {
+   "file": "structures/battery_A_L3.png"
+  }
+ },
+ "effects": {
+  "muzzle_infantry": {
+   "file": "effects/muzzle_infantry.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 32,
+   "fh": 32,
+   "anchor": [
+    0.1,
+    0.5
+   ]
+  },
+  "muzzle_tank": {
+   "file": "effects/muzzle_tank.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 64,
+   "fh": 64,
+   "anchor": [
+    0.1,
+    0.5
+   ]
+  },
+  "muzzle_artillery": {
+   "file": "effects/muzzle_artillery.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 80,
+   "fh": 80,
+   "anchor": [
+    0.1,
+    0.5
+   ]
+  },
+  "muzzle_air": {
+   "file": "effects/muzzle_air.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 48,
+   "fh": 48,
+   "anchor": [
+    0.1,
+    0.5
+   ]
+  },
+  "muzzle_naval": {
+   "file": "effects/muzzle_naval.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 96,
+   "fh": 96,
+   "anchor": [
+    0.1,
+    0.5
+   ]
+  },
+  "muzzle_aa": {
+   "file": "effects/muzzle_aa.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 48,
+   "fh": 48,
+   "anchor": [
+    0.1,
+    0.5
+   ]
+  },
+  "shell": {
+   "file": "effects/shell.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 32,
+   "fh": 16,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "rocket": {
+   "file": "effects/rocket.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 32,
+   "fh": 16,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "missile": {
+   "file": "effects/missile.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 40,
+   "fh": 16,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "impact_ground": {
+   "file": "effects/impact_ground.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 96,
+   "fh": 96,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "impact_air": {
+   "file": "effects/impact_air.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 96,
+   "fh": 96,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "impact_water": {
+   "file": "effects/impact_water.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 96,
+   "fh": 96,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "explosion_ground": {
+   "file": "effects/explosion_ground.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 128,
+   "fh": 128,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "explosion_air": {
+   "file": "effects/explosion_air.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 128,
+   "fh": 128,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "explosion_naval": {
+   "file": "effects/explosion_naval.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 128,
+   "fh": 128,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  },
+  "capture": {
+   "file": "effects/capture.png",
+   "frames": 1,
+   "frame_ms": 60,
+   "loop": false,
+   "fw": 96,
+   "fh": 96,
+   "anchor": [
+    0.5,
+    0.5
+   ]
+  }
+ },
+ "env": {
+  "cloud": {
+   "file": "env/cloud_shadow.png"
+  }
+ }
+}

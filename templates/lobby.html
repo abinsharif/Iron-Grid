@@ -33,6 +33,19 @@
     </nav>
   </header>
 
+  <button id="train-fab" class="train-fab hidden" title="Training">
+    \u2694\ufe0f<span id="train-count"></span>
+  </button>
+  <div id="modal-train" class="overlay fixed hidden">
+    <section class="panel modal-p wide">
+      <h2>Training</h2>
+      <p class="muted">Each tutorial teaches one tier with a scripted opponent. Finish it to unlock the next tier's tutorial and a mechanics reference entry. Completed tutorials can be replayed any time without the intro text.</p>
+      <div id="train-list" class="stack"></div>
+      <h3 style="margin-top:16px;font-size:1rem">Mechanics reference</h3>
+      <div id="train-ref"></div>
+      <div class="row-gap" style="justify-content:flex-end;margin-top:12px"><button id="train-close" class="btn-ig">Close</button></div>
+    </section>
+  </div>
   <main class="layout">
     <section id="lobby-loading" class="board-col" role="status" aria-live="polite">
       <p class="muted">Checking commander session...</p>

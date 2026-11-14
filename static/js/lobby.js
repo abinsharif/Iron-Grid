@@ -54,6 +54,56 @@
     renderMe(); refreshAll();
     if (!pollTimer) pollTimer = setInterval(refreshAll, 4000);
   }
+  // ---------------------------------------------------------------- training menu
+  let TRAIN = [];
+  async function loadTraining() {
+    try { TRAIN = (await api("/api/tutorials")).tutorials; } catch (e) { TRAIN = []; }
+    renderTrainFab();
+  }
+  function renderTrainFab() {
+    const fab = $("train-fab");
+    if (!fab || !TRAIN.length) return;
+    const done = TRAIN.filter(t => t.done).length, total = TRAIN.length;
+    fab.classList.remove("hidden");
+    fab.classList.toggle("fresh", done === 0);
+    fab.innerHTML = done === total ? "\u2705 Training" : `\u2694\ufe0f Training <span id="train-count">${done}/${total}</span>`;
+    fab.title = done === total ? "All tutorials complete - replay any from here" : "Tutorials and mechanics reference";
+    fab.onclick = openTraining;
+  }
+  async function startTutorial(tier, btn) {
+    if (btn) btn.disabled = true;
+    try { await api("/api/tutorial/start", { tier }); location.href = "/"; }
+    catch (e) { alert(e.message); if (btn) btn.disabled = false; }
+  }
+  function openTraining() {
+    const box = $("train-list"), ref = $("train-ref");
+    box.innerHTML = ""; ref.innerHTML = "";
+    const next = TRAIN.find(t => t.unlocked && !t.done);
+    TRAIN.forEach(t => {
+      const row = document.createElement("div");
+      row.className = "train-row" + (t.unlocked ? "" : " locked");
+      const status = t.done ? "\u2705 Completed" : t.unlocked ? "Available" : "\ud83d\udd12 Locked - complete Tier " + (t.tier - 1);
+      row.innerHTML = `<div><b>Tier ${t.tier} — ${esc(t.name)}</b><br><small class="muted">${esc(status)} · ${t.lessons.length - 1} lessons + final mission</small></div>`;
+      const b = document.createElement("button");
+      b.className = "btn-ig sm" + (next && next.tier === t.tier ? " primary" : "");
+      b.textContent = t.done ? "Replay" : "Start";
+      b.disabled = !t.unlocked;
+      b.addEventListener("click", () => startTutorial(t.tier, b));
+      row.appendChild(b);
+      box.appendChild(row);
+      if (t.done && t.reference) {
+        const d = document.createElement("details");
+        d.className = "train-ref-item";
+        d.innerHTML = `<summary><b>Tier ${t.tier}:</b> ${esc(t.reference.title)}</summary><ul>` +
+          t.reference.points.map(p => `<li>${esc(p)}</li>`).join("") + "</ul>";
+        ref.appendChild(d);
+      }
+    });
+    if (!ref.children.length) ref.innerHTML = '<div class="muted">Complete a tutorial to unlock its mechanics reference entry.</div>';
+    setHidden("modal-train", false);
+  }
+  $("train-close").addEventListener("click", () => setHidden("modal-train", true));
+
   function renderTierRating() {
     if (!ME || !ME.tiers) return;
     const sel = $("rank-tier-sel");
@@ -128,10 +178,11 @@
       d.className = "pitem";
       d.innerHTML = `<span><b>${esc(p.name)}</b> <span class="muted">· ${p.rank} ${esc(p.title)}</span></span>`;
       const b = document.createElement("button");
-      b.className = "btn-ig sm primary"; b.textContent = "Challenge";
+      b.className = "btn-ig sm primary" + (wiz.picked ? "" : " off"); b.textContent = "Challenge";
+      if (!wiz.picked) b.title = "Pick a tier and a map in the wizard above first";
       b.addEventListener("click", async () => {
         b.disabled = true;
-        try { await api("/api/pvp/create", { opponent: p.id, tier: wiz.tier,
+        try { await api("/api/pvp/create", { opponent: p.id, tier: wiz.tier, map: wiz.map,
                                              doctrine: $("doc-sel") ? $("doc-sel").value : "territ" }); location.href = "/"; }
         catch (e) { alert(e.message); b.disabled = false; }
       });
@@ -220,7 +271,7 @@
     6: "Naval warfare: warships, submarines, shore bombardment on 32×20 maps.",
   };
   const MAP_MAX_TIER = { 10: 3, 16: 4, 18: 5, 20: 6 };
-  const wiz = { step: 1, tier: 2, map: -1, level: "easy", doctrine: "territ" };
+  const wiz = { step: 1, tier: 2, map: -1, level: "easy", doctrine: "territ", picked: false };
 
   function wcards(box, items, sel, fn) {
     box.innerHTML = "";
@@ -251,7 +302,7 @@
     wcards($("wiz-tier"), Object.entries(META.tiers).map(([t, v]) => ({
       id: t,
       html: `<b>Tier ${t} — ${v.name}</b><small>${TIER_BLURB[t] || ""}</small>`,
-    })), wiz.tier, t => { wiz.tier = +t; wiz.map = -1; renderMapStep(); wiz.step = 2; wizShow(); });
+    })), wiz.tier, t => { wiz.tier = +t; wiz.map = -1; wiz.picked = false; renderMapStep(); wiz.step = 2; wizShow(); });
   }
   function mapsForTier() {
     return META.maps.map((m, i) => ({ m, i }))
@@ -263,11 +314,16 @@
         id: i,
         html: `<b>Map ${i + 1} — ${m.name}</b><small>${m.w || 14}×${m.h || 10} battlefield</small>`,
       })));
-    wcards($("wiz-map"), items, wiz.map, id => { wiz.map = +id; renderAiStep(); wiz.step = 3; wizShow(); });
+    wcards($("wiz-map"), items, wiz.map, id => { wiz.map = +id; wiz.picked = true; renderAiStep(); wiz.step = 3; wizShow(); });
   }
   function renderAiStep() {
     const box = $("wiz-ai");
     box.innerHTML = "";
+    const tb = document.createElement("button");
+    tb.className = "wcard";
+    tb.innerHTML = `<b>\u2694\ufe0f Training</b><small>Guided tutorials with a scripted opponent, replayable any time.</small>`;
+    tb.addEventListener("click", openTraining);
+    box.appendChild(tb);
     orderedLevels().forEach(([lvl, desc], i) => {
       const b = document.createElement("button");
       b.className = "wcard" + (wiz.level === lvl ? " sel" : "");
@@ -298,7 +354,7 @@
       rts.dataset.wired = "1";
       rts.addEventListener("change", renderTierRating);
     }
-    wiz.step = 1; wizShow(); renderTierStep();
+    wiz.step = 1; wizShow(); renderTierStep(); loadTraining();
   }
   $("wiz-back").addEventListener("click", () => {
     wiz.step = Math.max(1, wiz.step - 1); wizShow();

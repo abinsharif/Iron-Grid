@@ -1,6 +1,6 @@
 # IRON GRID
 
-**Current version: v4.7.3** — tiered turn-based tactics for your LAN. One account, six complete games: pick a ruleset,
+**Current version: v4.9.1** — tiered turn-based tactics for your LAN. One account, six complete games: pick a ruleset,
 pick a battlefield, pick an enemy — from the 4-unit Skirmish to combined-arms, engineers,
 doctrines, air power, and full naval war. Server-authoritative Flask + canvas, SQLite
 persistence, LAN multiplayer with in-game chat.
@@ -129,6 +129,13 @@ with every stat, matchup chip, and production rule.
 - `IRON_GRID_SECRET_KEY` — set it so logins survive restarts (never commit it).
 - `IRON_GRID_HOST` / `IRON_GRID_PORT` — default `0.0.0.0` / `5000`.
 - `FLASK_DEBUG=1` — development debugger; leave unset when hosting.
+
+## Tutorials
+
+Every tier has a guided training battle: a scripted opponent (identical moves, every
+game) and step-by-step objectives that teach only what is new at that tier. Tier 1's
+training ends in victory - capture the enemy HQ to graduate. Find it in the lobby
+wizard as the first card of the enemy step.
 
 ## Roadmap
 
